@@ -6,7 +6,7 @@
 #include "q_shared.h"
 
 
-#define THREAD_COUNT_MAX    4
+#define THREAD_COUNT_MAX    16
 
 #define THREAD_LOCK_SLOTS   1021
 

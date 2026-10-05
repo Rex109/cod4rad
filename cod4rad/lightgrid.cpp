@@ -40,7 +40,12 @@ int                *lightGridIndexes;                   /* 0x13063968 */
 vec3_t             *lightGridSkyTraceDirs;              /* 0x13063984 */
 
 
+#if defined( _WIN64 ) && !defined( SHOW_LAYOUT_CHECKS )
+/* The layouts below describe the 32-bit binary; pointers are twice as big on x64 */
+#define LG_CHECK( name, cond )  typedef char name[1]
+#else
 #define LG_CHECK( name, cond )  typedef char name[( cond ) ? 1 : -1]
+#endif
 
 LG_CHECK( lg_point_size,   sizeof( LightGridPoint_t ) == 12 );
 LG_CHECK( lg_sample_size,  sizeof( LightGridSample_t ) == 0xa8 );

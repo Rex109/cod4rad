@@ -1742,7 +1742,7 @@ char **Sys_ListFiles(const char *directory, const char *extension, const char *f
             Hunk_UserDestroy(hunkUser);
             return NULL;
         }
-        listCopy = (char **)Hunk_UserAlloc(hunkUser, nfiles * 4 + 8, 4);
+        listCopy = (char **)Hunk_UserAlloc(hunkUser, ( nfiles + 2 ) * sizeof( char * ), 4);
         *(void **)listCopy = hunkUser;
         listCopy++;
         for (i = 0; i < nfiles; i++)
@@ -1810,7 +1810,7 @@ char **Sys_ListFiles(const char *directory, const char *extension, const char *f
         return NULL;
     }
 
-    listCopy = (char **)Hunk_UserAlloc(hunkUser, nfiles * 4 + 8, 4);
+    listCopy = (char **)Hunk_UserAlloc(hunkUser, ( nfiles + 2 ) * sizeof( char * ), 4);
     *(void **)listCopy = hunkUser;
     listCopy++;
     for (i = 0; i < nfiles; i++)

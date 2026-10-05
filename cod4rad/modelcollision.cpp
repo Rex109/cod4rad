@@ -23,7 +23,12 @@ RadModelDef_t  *radModelDefs;                           /* 0x130a3df0 */
 ModelCellNode_t modelCells[MODEL_CELL_NODE_COUNT];      /* 0x130a3dfc */
 
 
+#if defined( _WIN64 ) && !defined( SHOW_LAYOUT_CHECKS )
+/* The layouts below describe the 32-bit binary; pointers are twice as big on x64 */
+#define MC_CHECK( name, cond )  typedef char name[1]
+#else
 #define MC_CHECK( name, cond )  typedef char name[( cond ) ? 1 : -1]
+#endif
 
 MC_CHECK( mc_cell_size, sizeof( ModelCellNode_t ) == 16 );
 MC_CHECK( mc_node_size, sizeof( ModelAabbNode_t ) == 40 );

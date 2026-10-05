@@ -7,7 +7,11 @@
 
 #ifndef PSIZE_INT_DEFINED
 #define PSIZE_INT_DEFINED
+#ifdef _WIN64
+typedef __int64      psize_int;     /* holds a pointer, as in the 32-bit build */
+#else
 typedef int          psize_int;
+#endif
 typedef unsigned int uint;
 #endif
 
@@ -64,7 +68,12 @@ typedef struct HunkUser_s
     bool               fixed;       /* +0x18 */
     bool               debugMemory; /* +0x19 */
     int                type;        /* +0x1c */
+#ifdef _WIN64
+    /* The header is bigger with 8 byte pointers; keep the data 32 byte aligned as in the 32-bit build */
+    __declspec( align( 32 ) ) byte buf[1];
+#else
     byte               buf[1];      /* +0x20 */
+#endif
 } HunkUser;
 
 void  *Z_VirtualReserve( int size );
@@ -99,7 +108,7 @@ void  *Hunk_FindDataForFile( int type, const char *name );
 char  *Hunk_AddDataForFile( int type, const char *name, void *data, HunkAllocFunc_t allocFunc );
 void   Hunk_AddData( int type, void *data, HunkAllocFunc_t allocFunc );
 void   Hunk_OverrideDataForFile( int type, const char *name, void *data );
-void   Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, unsigned int lowAddr, unsigned int highAddr );
+void   Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, size_t lowAddr, size_t highAddr );
 void   Hunk_ClearTempMemory( void );
 
 typedef void (*HunkAssetFunc_t)( void *data, void *userData );

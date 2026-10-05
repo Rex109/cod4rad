@@ -16,6 +16,8 @@
 #include "compile.h"
 #include "polylib.h"
 #include "lightgrid.h"
+#include "gputrace.h"
+#include "gputransport.h"
 
 #include <string.h>
 #include <stddef.h>
@@ -27,7 +29,12 @@
 #include <float.h>
 
 
+#if defined( _WIN64 ) && !defined( SHOW_LAYOUT_CHECKS )
+/* The layouts below describe the 32-bit binary; pointers are twice as big on x64 */
+#define GEO_CHECK( name, cond )  typedef char name[1]
+#else
 #define GEO_CHECK( name, cond )  typedef char name[( cond ) ? 1 : -1]
+#endif
 
 GEO_CHECK( geo_xyz_at_4,        offsetof( geoGlob_t, worldSpaceXyz ) == 0x4 );
 GEO_CHECK( geo_mins_after_xyz,  offsetof( geoGlob_t, mins ) == 0x6C0004 );
@@ -38,11 +45,14 @@ GEO_CHECK( geo_firstbrushside,  offsetof( geoGlob_t, firstBrushSide )
                                 - offsetof( geoGlob_t, triRefUsed ) == 0x024 );
 GEO_CHECK( geo_hunk,            offsetof( geoGlob_t, hunk )
                                 - offsetof( geoGlob_t, triRefUsed ) == 0x028 );
+/* The original had 4 hunks (0x28..0x58); there is one per thread now */
+#define GEO_HUNK_EXTRA     ( ( GEO_MAX_HUNKS - 4 ) * ( int )sizeof( GeoHunk_t ) )
+
 GEO_CHECK( geo_ssaa_offset,     offsetof( geoGlob_t, supersampleAlphaOffset )
-                                - offsetof( geoGlob_t, triRefUsed ) == 0x058 );
+                                - offsetof( geoGlob_t, triRefUsed ) == 0x058 + GEO_HUNK_EXTRA );
 GEO_CHECK( geo_ssaa_fills,      sizeof( geoGlob.supersampleAlphaOffset ) == 0x150 - 0x058 );
 GEO_CHECK( geo_trimin,          offsetof( geoGlob_t, triMin )
-                                - offsetof( geoGlob_t, triRefUsed ) == 0x150 );
+                                - offsetof( geoGlob_t, triRefUsed ) == 0x150 + GEO_HUNK_EXTRA );
 
 GEO_CHECK( geo_hunk_size,       sizeof( GeoHunk_t ) == 12 );
 GEO_CHECK( geo_mskmtl_size,     sizeof( MskMaterial_t ) == 28 );
@@ -995,7 +1005,7 @@ void Geo_TraceModelTriangle( const ModelCollTri_t *tri, int scripted, GeoTrace_t
     if ( edgeDot1 - edgeDot2 < denom )
         return;
 
-    Geo_AddHit( TRACE_HIT_MODEL_GEO, ( const GeoTriangle_t * )scripted,
+    Geo_AddHit( TRACE_HIT_MODEL_GEO, ( const GeoTriangle_t * )( intptr_t )scripted,
                 ( const MskMaterial_t * )tri->mskMtl,
                 dist / denom, edgeDot2, edgeDot1, sign, denom,
                 tri->edge0, tri->edge1, tri->st[0], tri->st[1], tri->st[2],
@@ -1945,6 +1955,206 @@ static void Geo_RemoveSampleArea( const LmapSubSample_t *subSample, float area, 
     Unlock( subSample->sample );
 }
 
+/* ---- GPU transport batching ----------------------------------------------
+   With -gpu the radiosity traces of many sub-samples are gathered into one
+   batch and traced together on the GPU.  Everything else a sub-sample does
+   (sun, point lights, bounce bookkeeping) stays on the CPU and runs per job
+   once the traces are back, in the same order the CPU path would use. */
+
+#define GPU_BATCH_RAYS      131072
+#define GPU_CHUNK_TRIS      32
+
+typedef struct
+{
+    float           areaX2;
+    LmapSubSample_t subSample;
+    vec3_t          pos;
+    vec3_t          basis[3];
+    vec3_t          ds;
+    vec3_t          dt;
+    int             lightType;
+    int             triIndex;
+    int             cellIndex;
+} GpuTransportJob_t;
+
+typedef struct
+{
+    GpuTransportJob_t *jobs;
+    int                jobCount;
+    int                jobMax;
+    GpuRay_t          *rays;
+    vec3_t            *dirs;
+    GpuHit_t          *hits;
+} GpuTransportBatch_t;
+
+static GpuTransportBatch_t gpuBatch[THREAD_COUNT_MAX];
+static bool                gpuBatchActive;
+
+/* Seconds per thread: picking ray directions, the GPU call (including queueing
+   behind other threads), and everything done with the results */
+static double              gpuBatchProfile[THREAD_COUNT_MAX][3];
+
+static void Geo_GpuAllocBatches( int threads )
+{
+    int rayCount = options.radiosityTraceCount;
+    int jobMax   = GPU_BATCH_RAYS / rayCount;
+    int i;
+
+    /* Keep the total memory for batches bounded when many threads are used */
+    if ( threads > 4 )
+        jobMax = jobMax * 4 / threads;
+
+    if ( jobMax < 1 )
+        jobMax = 1;
+
+    for ( i = 0; i < threads; i++ )
+    {
+        GpuTransportBatch_t *batch = &gpuBatch[i];
+
+        batch->jobMax   = jobMax;
+        batch->jobCount = 0;
+        batch->jobs = ( GpuTransportJob_t * )malloc( jobMax * sizeof( GpuTransportJob_t ) );
+        batch->rays = ( GpuRay_t * )malloc( jobMax * rayCount * sizeof( GpuRay_t ) );
+        batch->dirs = ( vec3_t * )malloc( jobMax * rayCount * sizeof( vec3_t ) );
+        batch->hits = ( GpuHit_t * )malloc( jobMax * rayCount * sizeof( GpuHit_t ) );
+
+        if ( !batch->jobs || !batch->rays || !batch->dirs || !batch->hits )
+            Error( "Couldn't allocate memory for the GPU trace batch\n" );
+    }
+}
+
+static void Geo_GpuFreeBatches( void )
+{
+    int i;
+
+    for ( i = 0; i < THREAD_COUNT_MAX; i++ )
+    {
+        free( gpuBatch[i].jobs );
+        free( gpuBatch[i].rays );
+        free( gpuBatch[i].dirs );
+        free( gpuBatch[i].hits );
+
+        memset( &gpuBatch[i], 0, sizeof( gpuBatch[i] ) );
+    }
+}
+
+static void Geo_GpuFlush( int threadIndex )
+{
+    GpuTransportBatch_t *batch = &gpuBatch[threadIndex];
+    int                  rayCount = options.radiosityTraceCount;
+    int                  i;
+
+    double               t0;
+    double               t1;
+
+    if ( !batch->jobCount )
+        return;
+
+    t0 = GpuTrace_Seconds();
+
+    for ( i = 0; i < batch->jobCount; i++ )
+    {
+        const GpuTransportJob_t *job = &batch->jobs[i];
+
+        Compile_GpuRays( job->pos, job->basis, &batch->rays[i * rayCount],
+                         &batch->dirs[i * rayCount] );
+    }
+
+    t1 = GpuTrace_Seconds();
+    gpuBatchProfile[threadIndex][0] += t1 - t0;
+    t0 = t1;
+
+    if ( !GpuTrace_Trace( batch->rays, batch->hits, batch->jobCount * rayCount ) )
+        Error( "The GPU stopped responding while tracing.  Run again without -gpu.\n" );
+
+    t1 = GpuTrace_Seconds();
+    gpuBatchProfile[threadIndex][1] += t1 - t0;
+    t0 = t1;
+
+    for ( i = 0; i < batch->jobCount; i++ )
+    {
+        GpuTransportJob_t *job = &batch->jobs[i];
+        vec3_t             axis0;
+        vec3_t             axis1;
+        float              area;
+        float              subArea;
+        float              radius;
+        qboolean           traced;
+
+        /* Re-read the sample weights: earlier jobs may have removed area from them */
+        subArea = Geo_ClampedMin( job->areaX2,
+                                  job->subSample.sample->subWeight[job->subSample.fracS
+                                                                   + job->subSample.fracT * 2] );
+
+        if ( subArea == 0.0f )
+            continue;
+
+        area = Geo_ClampedMin( job->areaX2, job->subSample.sample->areaX2 );
+
+        radius = ( float )sqrt( ( float )( subArea * TRANSPORT_CELL_AREA_SCALE ) ) * TRANSPORT_CELL_RADIUS;
+
+        Vec3Scale( job->ds, radius, axis0 );
+        Vec3Scale( job->dt, radius, axis1 );
+
+        Compile_SetGpuTrace( threadIndex, &batch->dirs[i * rayCount], &batch->hits[i * rayCount] );
+
+        traced = Compile_TraceSubSample( threadIndex, job->lightType, job->pos, axis0, axis1,
+                                         job->basis, area, subArea, &job->subSample );
+
+        Compile_SetGpuTrace( threadIndex, NULL, NULL );
+
+        if ( !traced )
+        {
+            Geo_RemoveSampleArea( &job->subSample, area, subArea );
+            Lighting_Suppress( threadIndex, job->triIndex, job->cellIndex );
+        }
+    }
+
+    gpuBatchProfile[threadIndex][2] += GpuTrace_Seconds() - t0;
+
+    batch->jobCount = 0;
+}
+
+/* Prints where the threads spent their time, then clears the totals */
+void Geo_PrintGpuProfile( int threads )
+{
+    double total[3] = { 0.0, 0.0, 0.0 };
+    int    i;
+    int    j;
+
+    for ( i = 0; i < threads; i++ )
+        for ( j = 0; j < 3; j++ )
+            total[j] += gpuBatchProfile[i][j];
+
+    Print( "GPU: time over all %i threads: choosing ray directions %.1fs, GPU call %.1fs,"
+           " using the results %.1fs\n", threads, total[0], total[1], total[2] );
+
+    memset( gpuBatchProfile, 0, sizeof( gpuBatchProfile ) );
+}
+
+static void Geo_GpuDefer( const TransportTri_t *transport, float areaX2,
+                          const LmapSubSample_t *subSample, const vec3_t pos,
+                          const vec3_t *basis, int lightType, int cellIndex )
+{
+    GpuTransportBatch_t *batch = &gpuBatch[transport->threadIndex];
+    GpuTransportJob_t   *job   = &batch->jobs[batch->jobCount++];
+
+    job->areaX2    = areaX2;
+    job->subSample = *subSample;
+    Vec3Copy( pos, job->pos );
+    Vec3Copy( basis[0], job->basis[0] );
+    Vec3Copy( basis[1], job->basis[1] );
+    Vec3Copy( basis[2], job->basis[2] );
+    Vec3Copy( transport->xyz.ds, job->ds );
+    Vec3Copy( transport->xyz.dt, job->dt );
+    job->lightType = lightType;
+    job->triIndex  = transport->triIndex;
+    job->cellIndex = cellIndex;
+
+    if ( batch->jobCount == batch->jobMax )
+        Geo_GpuFlush( transport->threadIndex );
+}
+
 /* Geo_AddTransport  0x0040bc80 */
 static void Geo_AddTransport( float areaX2, const vec2_t centroid, const vec2_t *coords,
                               int vertCount, void *userData, int cellIndex )
@@ -2006,6 +2216,12 @@ static void Geo_AddTransport( float areaX2, const vec2_t centroid, const vec2_t 
     Vec3Scale( transport->xyz.dt, radius, axis1 );
 
     lightType = geoTris[transport->triIndex].primaryLightIndex;
+
+    if ( gpuBatchActive )
+    {
+        Geo_GpuDefer( transport, areaX2, &subSample, pos, basis, lightType, cellIndex );
+        return;
+    }
 
     if ( options.relight )
     {
@@ -2124,9 +2340,41 @@ static void Geo_TransportTriangle( int triIndex, int threadIndex )
                                 Geo_AddTransport );
 }
 
+/* One unit of work for the GPU path: a few triangles whose rays are traced together */
+static void Geo_GpuTransportChunk( int chunkIndex, int threadIndex )
+{
+    int first = chunkIndex * GPU_CHUNK_TRIS;
+    int last  = first + GPU_CHUNK_TRIS;
+    int i;
+
+    if ( last > geoTriCount )
+        last = geoTriCount;
+
+    for ( i = first; i < last; i++ )
+        Geo_TransportTriangle( i, threadIndex );
+
+    Geo_GpuFlush( threadIndex );
+}
+
 /* Geo_BuildTransport  0x0040c700 */
 void Geo_BuildTransport( int threads )
 {
+    /* Relighting reuses the stored radiosity transport and never traces it */
+    if ( !options.relight && GpuTransport_Enabled() )
+    {
+        Geo_GpuAllocBatches( threads );
+
+        gpuBatchActive = true;
+        RunThreadsOn( ( geoTriCount + GPU_CHUNK_TRIS - 1 ) / GPU_CHUNK_TRIS,
+                      Geo_GpuTransportChunk, threads );
+        gpuBatchActive = false;
+
+        Geo_GpuFreeBatches();
+        Geo_PrintGpuProfile( threads );
+        Compile_PrintGpuProfile( threads );
+        return;
+    }
+
     RunThreadsOn( geoTriCount, Geo_TransportTriangle, threads );
 }
 

@@ -1034,7 +1034,7 @@ XModel_t *XModel_Load( const char *name, XModelAllocFunc_t allocFunc,
     Assert( model->numSurfaces == numsurfs );
 
     model->surfs = ( XSurface_t * )allocFunc( numsurfs * sizeof( XSurface_t ) );
-    model->materialNames = ( char ** )allocFunc( numsurfs * 4 );
+    model->materialNames = ( char ** )allocFunc( numsurfs * sizeof( char * ) );
 
     surfIndex = 0;
     modelLodInfo = model->lodInfo;

@@ -310,7 +310,7 @@ char *Hunk_AddDataForFile( int type, const char *name, void *data, HunkAllocFunc
 
     Assert( !Hunk_FindDataForFileInternal( type, name, hash ) );
 
-    fileData = (hunkFileEntry_t *)allocFunc( I_strlen( name ) + 10 );
+    fileData = (hunkFileEntry_t *)allocFunc( offsetof( hunkFileEntry_t, name ) + I_strlen( name ) + 1 );
     fileData->data = data;
     fileData->type = (byte)type;
 
@@ -367,7 +367,7 @@ void Hunk_OverrideDataForFile( int type, const char *name, void *data )
 }
 
 /* Hunk_PurgeFreeListRange  0x00413640 */
-void Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, unsigned int lowAddr, unsigned int highAddr )
+void Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, size_t lowAddr, size_t highAddr )
 {
     hunkFileEntry_t *fileData;
 
@@ -377,7 +377,7 @@ void Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, unsigned int lowAddr, 
     {
         fileData = *listHead;
 
-        if ( (unsigned int)fileData < lowAddr || highAddr <= (unsigned int)fileData )
+        if ( (size_t)fileData < lowAddr || highAddr <= (size_t)fileData )
             listHead = &fileData->next;
         else
             *listHead = fileData->next;
@@ -387,7 +387,7 @@ void Hunk_PurgeFreeListRange( hunkFileEntry_t **listHead, unsigned int lowAddr, 
 /* Hunk_ClearTempMemory  0x00413590 */
 void Hunk_ClearTempMemory( void )
 {
-    unsigned int lowAddr, highAddr;
+    size_t lowAddr, highAddr;
     unsigned int i;
 
     Assert( Sys_IsMainThread() );

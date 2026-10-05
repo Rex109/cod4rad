@@ -8,6 +8,7 @@
 #include "threads.h"
 #include "pointlights.h"
 #include "cmdline.h"
+#include "gputrace.h"
 
 
 typedef struct
@@ -129,6 +130,14 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
                                  const vec3_t axis0, const vec3_t axis1,
                                  const vec3_t *axis, float scale, float subAreaX2,
                                  struct LmapSubSample_s *subSample );   /* 0x004083a0 */
+
+/* GPU path: Compile_GpuRays picks the radiosity directions for one sub-sample and
+   fills in the rays to trace.  Compile_SetGpuTrace then makes the next
+   Compile_TraceSubSample on that thread use the traced results (pass NULLs to
+   go back to tracing on the CPU). */
+void Compile_GpuRays( const vec3_t pos, const vec3_t *axis, GpuRay_t *rays, vec3_t *dirs );
+void Compile_PrintGpuProfile( int threads );
+void Compile_SetGpuTrace( int threadIndex, const vec3_t *dirs, const GpuHit_t *hits );
 
 void RunLightCompile( int threadCount );        /* 0x004080b0 */
 

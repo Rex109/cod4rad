@@ -1,8 +1,7 @@
 workspace "cod4rad"
     location "build"
     configurations { "Debug", "Release" }
-    platforms { "Win32" }
-    architecture "x86"
+    platforms { "Win32", "x64" }
     startproject "cod4rad"
 
     if _ACTION and not _ACTION:startswith("vs") then
@@ -13,7 +12,7 @@ project "cod4rad"
     kind "ConsoleApp"
     language "C++"
     targetdir "bin"
-    objdir "build/obj/%{cfg.buildcfg}"
+    objdir "build/obj/%{cfg.platform}/%{cfg.buildcfg}"
     targetname "cod4rad"
 
     -- Original is built with the static, non-debug CRT in every configuration
@@ -65,8 +64,20 @@ project "cod4rad"
 
     defines { "WIN32", "_WINDOWS", "_CRT_SECURE_NO_WARNINGS" }
 
-    -- x87 codegen on purpose: SSE2 changes floating-point results and output bytes
-    vectorextensions "IA32"       -- /arch:IA32
+    -- Win32 is the byte-exact build: x87 codegen on purpose, since SSE2 changes
+    -- floating-point results and output bytes.  x64 always uses SSE2 and is not
+    -- byte-exact; it exists for maps that run out of 32-bit address space.
+    filter "platforms:Win32"
+        architecture "x86"
+        vectorextensions "IA32"   -- /arch:IA32
+
+    filter "platforms:x64"
+        architecture "x86_64"
+        targetdir "bin/x64"
+        linkoptions { "/STACK:0x1000000" }   -- frames are bigger with 8 byte pointers
+        buildoptions { "/w14311", "/w14312", "/w14302", "/w14306" }   -- pointer <-> int truncation
+
+    filter {}
     floatingpoint "Default"
     buildoptions { "/fp:precise", "/GS-", "/Gy" }
     warnings "Default"            -- /W3
@@ -76,11 +87,12 @@ project "cod4rad"
 
     linkoptions {
         "/SUBSYSTEM:CONSOLE",
-        "/STACK:0x400000,0x1000",
-        "/DYNAMICBASE:NO",
-        "/FIXED",
-        "/LARGEADDRESSAWARE",
     }
+
+    filter "platforms:Win32"
+        linkoptions { "/STACK:0x400000,0x1000", "/DYNAMICBASE:NO", "/FIXED", "/LARGEADDRESSAWARE" }
+
+    filter {}
 
     links { "user32", "gdi32", "kernel32", "advapi32", "winmm" }
 

@@ -105,7 +105,7 @@ static void DObj_SetupSkeleton( DObj_t *obj, const DObjModel_t *dobjModels,
     obj->numModels = ( byte )numModels;
     obj->numBones  = ( byte )totalBones;
 
-    models = ( byte * )malloc( numModels * 5 );
+    models = ( byte * )malloc( numModels * ( sizeof( XModel_t * ) + 1 ) );
 
     obj->models = ( XModel_t ** )models;
 

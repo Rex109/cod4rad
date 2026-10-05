@@ -2211,7 +2211,7 @@ void FS_AddIwdFilesForGameDirectory( const char *path, const char *dir )
     const char   *language;
     iwd_t        *pak;
     searchpath_t *search;
-    size_t        numfiles;
+    int           numfiles;
     int           localized;
     int           iLanguage;
     int           i;
@@ -2219,7 +2219,7 @@ void FS_AddIwdFilesForGameDirectory( const char *path, const char *dir )
     FS_BuildOSPath( path, dir, "", ospath );
     ospath[strlen( ospath ) - 1] = '\0';
 
-    iwdfiles = Sys_ListFiles( ospath, "iwd", NULL, (int *)&numfiles, 0 );
+    iwdfiles = Sys_ListFiles( ospath, "iwd", NULL, &numfiles, 0 );
 
     if ( (int)numfiles > MAX_IWD_FILES )
     {

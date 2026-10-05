@@ -1120,7 +1120,7 @@ void Dvar_SetVariant( Dvar_t *dvar, DvarValue_t value, DvarSetSource_t source )
             freeLatched = Dvar_ShouldFreeLatchedString( dvar );
             if ( freeLatched )
                 Dvar_FreeString( &dvar->latched.string );
-            dvar->latched.integer = 0;
+            dvar->latched.string = NULL;
             Dvar_MakeStringValue( dvar->current.string, &dvar->latched );
 
             if ( freeOld )
@@ -1328,15 +1328,15 @@ void Dvar_Shutdown( void )
         {
             if ( Dvar_ShouldFreeCurrentString( dvar ) )
                 Dvar_FreeString( &dvar->current.string );
-            dvar->current.integer = 0;
+            dvar->current.string = NULL;
 
             if ( Dvar_ShouldFreeResetString( dvar ) )
                 Dvar_FreeString( &dvar->reset.string );
-            dvar->reset.integer = 0;
+            dvar->reset.string = NULL;
 
             if ( Dvar_ShouldFreeLatchedString( dvar ) )
                 Dvar_FreeString( &dvar->latched.string );
-            dvar->latched.integer = 0;
+            dvar->latched.string = NULL;
         }
 
         if ( dvar->flags & DVAR_EXTERNAL )
@@ -1370,12 +1370,12 @@ static void Dvar_MakeExternal( Dvar_t *dvar )
 
         if ( Dvar_ShouldFreeLatchedString( dvar ) )
             Dvar_FreeString( &dvar->latched.string );
-        dvar->latched.integer = 0;
+        dvar->latched.string = NULL;
         Dvar_MakeStringValue( dvar->current.string, &dvar->latched );
 
         if ( Dvar_ShouldFreeResetString( dvar ) )
             Dvar_FreeString( &dvar->reset.string );
-        dvar->reset.integer = 0;
+        dvar->reset.string = NULL;
         Dvar_MakeResetStringValue( dvar, &newValue, Dvar_DisplayableResetValue( dvar ) );
         dvar->reset.string = newValue.string;
 
@@ -1474,7 +1474,7 @@ static void Dvar_AssignCurrentAndLatchedValues( Dvar_t *dvar, DvarValue_t value 
 
             if ( Dvar_ShouldFreeLatchedString( dvar ) )
                 Dvar_FreeString( &dvar->latched.string );
-            dvar->latched.integer = 0;
+            dvar->latched.string = NULL;
             Dvar_MakeStringValue( dvar->current.string, &dvar->latched );
 
             if ( freeOld )
@@ -1522,15 +1522,15 @@ static void Dvar_ReRegisterVariant( Dvar_t *dvar, const char *dvarName, dvarType
         if ( Dvar_ShouldFreeCurrentString( dvar ) )
             Dvar_FreeString( &dvar->current.string );
     }
-    dvar->current.integer = 0;
+    dvar->current.string = NULL;
 
     if ( Dvar_ShouldFreeLatchedString( dvar ) )
         Dvar_FreeString( &dvar->latched.string );
-    dvar->latched.integer = 0;
+    dvar->latched.string = NULL;
 
     if ( Dvar_ShouldFreeResetString( dvar ) )
         Dvar_FreeString( &dvar->reset.string );
-    dvar->reset.integer = 0;
+    dvar->reset.string = NULL;
 
     Dvar_SetResetValue( dvar, resetValue );
     Dvar_AssignCurrentAndLatchedValues( dvar, newValue );

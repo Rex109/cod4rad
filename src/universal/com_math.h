@@ -82,6 +82,15 @@ int Float_GetBits( const float *f );
 /* Float_IsNanOrInf  0x0044c140 */
 bool Float_IsNanOrInf( float f );
 
+#ifdef _WIN64
+#include <emmintrin.h>
+
+/* Rounds to nearest even, like fistp does in the default x87 rounding mode */
+inline int Fistp( double value )
+{
+    return _mm_cvtsd_si32( _mm_set_sd( value ) );
+}
+#else
 inline int Fistp( double value )
 {
     int result;
@@ -94,6 +103,7 @@ inline int Fistp( double value )
 
     return result;
 }
+#endif
 
 /* RoundFloatToInt  0x00416540 */
 #define FISTP_BIAS          9.313225746154785e-10

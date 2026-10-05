@@ -40,7 +40,12 @@ byte *const lmapSubBytes = bspLightBytes
                            + LIGHTMAP_PLANE_BYTES * 2;      /* 0x006b2d00 */
 
 
+#if defined( _WIN64 ) && !defined( SHOW_LAYOUT_CHECKS )
+/* The layouts below describe the 32-bit binary; pointers are twice as big on x64 */
+#define LT_CHECK( name, cond )  typedef char name[1]
+#else
 #define LT_CHECK( name, cond )  typedef char name[( cond ) ? 1 : -1]
+#endif
 
 LT_CHECK( lt_def_size,  sizeof( LmapDef_t ) == 24 );
 LT_CHECK( lt_def_fits,  LIGHTMAP_BYTES_PER_MAP == LIGHTMAP_SAMPLE_COUNT * sizeof( LmapDef_t ) );
@@ -80,10 +85,8 @@ void Lighting_AllocLightmaps( void )
 
     numBSPLightBytes = lightingGlob.lmapCount * LIGHTMAP_BYTES_PER_MAP2;
 
-    lightingGlob.lastSuppressed[0] = -1;
-    lightingGlob.lastSuppressed[1] = -1;
-    lightingGlob.lastSuppressed[2] = -1;
-    lightingGlob.lastSuppressed[3] = -1;
+    for ( int threadIndex = 0; threadIndex < THREAD_COUNT_MAX; threadIndex++ )
+        lightingGlob.lastSuppressed[threadIndex] = -1;
 
     lightingGlob.suppressedCount = 0;
 }
@@ -237,7 +240,7 @@ static void Lighting_AssignSampleVars( LmapDef_t *sample, int threadIndex )
 /* Lighting_AllocSamples  0x004140a0 */
 void Lighting_AllocSamples( void )
 {
-    int bytes;
+    size_t bytes;
 
     Assertx( lightingGlob.totalSampleCount == 0, "lightingGlob.totalSampleCount == 0" );
 
@@ -253,7 +256,7 @@ void Lighting_AllocSamples( void )
              "lightingGlob.usefulSampleCount <= lightingGlob.totalSampleCount\n\t%i, %i",
              lightingGlob.usefulSampleCount, lightingGlob.totalSampleCount );
 
-    bytes = lightingGlob.usefulSampleCount * sizeof( SampleVars_t );
+    bytes = ( size_t )lightingGlob.usefulSampleCount * sizeof( SampleVars_t );
 
     lightingGlob.sampleVars =
         ( SampleVars_t * )new ( std::nothrow ) byte[bytes];
@@ -264,7 +267,7 @@ void Lighting_AllocSamples( void )
 
     memset( lightingGlob.sampleVars, 0, bytes );
 
-    bytes = options.radiosityTraceCount * lightingGlob.usefulSampleCount
+    bytes = ( size_t )options.radiosityTraceCount * lightingGlob.usefulSampleCount
             * sizeof( float );
 
     lightingGlob.skyInfluences = ( float * )new ( std::nothrow ) byte[bytes];

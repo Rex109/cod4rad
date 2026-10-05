@@ -5,10 +5,12 @@
 #include "progress.h"
 #include "mapio.h"
 #include "compile.h"
+#include "crashlog.h"
 
 #include "scr_stringlist.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <stdarg.h>
 #include <new>
 #include <windows.h>
@@ -36,6 +38,8 @@ int main( int argc, const char **argv )
     int hours;
     int minutes;
     int seconds;
+
+    CrashLog_Install();
 
     startTime = ( int )timeGetTime();
 

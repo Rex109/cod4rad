@@ -274,10 +274,10 @@ void XSurfaceLoad( XModel_t *model, const byte **pos, XModelAllocFunc_t allocFun
     surface->vertListCount = vertListCount;
 
     surface->vertList = vertListCount
-                      ? ( XRigidVertList * )allocFunc( vertListCount * 12 )
+                      ? ( XRigidVertList * )allocFunc( vertListCount * sizeof( XRigidVertList ) )
                       : NULL;
 
-    memcpy( surface->vertList, rigidVertListArray, vertListCount * 12 );
+    memcpy( surface->vertList, rigidVertListArray, vertListCount * sizeof( XRigidVertList ) );
 
     size = surface->vertCount * 32;
 

@@ -3,6 +3,7 @@
 #include "cod4rad.h"
 #include "cmdline.h"
 #include "progress.h"
+#include "gputransport.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,10 +33,34 @@ static int GetDefaultThreadCount( void )
     if ( ( int )systemInfo.dwNumberOfProcessors < RAD_THREAD_COUNT_MIN )
         return RAD_THREAD_COUNT_MIN;
 
-    if ( ( int )systemInfo.dwNumberOfProcessors > RAD_THREAD_COUNT_MAX )
-        return RAD_THREAD_COUNT_MAX;
+    if ( ( int )systemInfo.dwNumberOfProcessors > RAD_THREAD_COUNT_DEFAULT_MAX )
+        return RAD_THREAD_COUNT_DEFAULT_MAX;
 
     return ( int )systemInfo.dwNumberOfProcessors;
+}
+
+static bool threadCountSet;
+
+/* The radiosity trace is the part the GPU takes over, which leaves the CPU side
+   (lightmap lookups and bounce bookkeeping) as the bottleneck.  Use every core
+   for it unless the user chose a thread count. */
+static void ApplyGpuThreadDefault( void )
+{
+    SYSTEM_INFO systemInfo;
+    int         count;
+
+    if ( !gpuTransportRequested || threadCountSet )
+        return;
+
+    GetSystemInfo( &systemInfo );
+
+    count = ( int )systemInfo.dwNumberOfProcessors;
+
+    if ( count > RAD_THREAD_COUNT_MAX )
+        count = RAD_THREAD_COUNT_MAX;
+
+    if ( count > options.threadCount )
+        options.threadCount = count;
 }
 
 /* SetDefaultOptions  0x00405730 */
@@ -208,6 +233,13 @@ static int OptNoModelShadow( int argc, const char **argv )
     return 1;
 }
 
+/* OptGpu */
+static int OptGpu( int argc, const char **argv )
+{
+    gpuTransportRequested = true;
+    return 1;
+}
+
 /* OptTraces  0x00405be0 */
 static int OptTraces( int argc, const char **argv )
 {
@@ -306,6 +338,8 @@ static int OptBasisDirCount( int argc, const char **argv )
 /* OptThreads  0x00405e10 */
 static int OptThreads( int argc, const char **argv )
 {
+    threadCountSet = true;
+
     return GetIntOption( argc, argv, &options.threadCount,
                          RAD_THREAD_COUNT_MIN, RAD_THREAD_COUNT_MAX );
 }
@@ -344,6 +378,7 @@ static int OptDumpOptions( int argc, const char **argv )
     DumpBool(  "model shadows:",                  options.modelShadow != 0 );
     DumpInt(   "basis direction count:",          options.basisDirCount );
     DumpBool(  "verbose messages:",               options.verbose != 0 );
+    DumpBool(  "gpu radiosity traces:",           gpuTransportRequested );
 
     return 1;
 }
@@ -372,6 +407,7 @@ static const RadOption_t radOptions[] =                     /* 0x004742f8 */
     { "-NoRelight",         "Disable optimization of using results from last compile",  OptNoRelight         },
     { "-BasisDirCount",     "Sample directions used to approximate lightmap pixel",     OptBasisDirCount     },
     { "-Threads",           "Allows using more or fewer threads than processors",       OptThreads           },
+    { "-Gpu",               "Trace radiosity on the GPU (Direct3D 11); results may differ slightly", OptGpu },
     { "-DumpOptions",       "Displays current settings of most parameters",             OptDumpOptions       },
 };
 
@@ -479,6 +515,8 @@ bool ParseCommandLine( int argc, const char **argv )
 
     if ( !ParseOptions( argc, 1, argv ) )
         return false;
+
+    ApplyGpuThreadDefault();
 
     if ( !ValidatePlatformSet() )
         return false;

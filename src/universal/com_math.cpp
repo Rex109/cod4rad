@@ -2825,6 +2825,44 @@ void ProjectPointOnPlane( const vec3_t point, const vec3_t normal, vec3_t out )
     Vec3Mad( point, dot, normal, out );
 }
 
+#ifdef _WIN64
+/* BoxOnPlaneSide  0x00473a50 */
+int BoxOnPlaneSide( const vec3_t emins, const vec3_t emaxs, const struct cplane_s *p )
+{
+    /* cplane_s: normal[3], dist, type, signbits */
+    const float *normal   = ( const float * )p;
+    float        planeDist = normal[3];
+    int          signbits = ( ( const byte * )p )[17];
+    const float *near_[3];
+    const float *far_[3];
+    float        dist1;
+    float        dist2;
+    int          sides;
+    int          i;
+
+    Assertx( signbits < 8, "BoxOnPlaneSide: invalid signbits for plane" );
+
+    for ( i = 0; i < 3; i++ )
+    {
+        /* dist1 takes the corner furthest along the normal, dist2 the nearest */
+        near_[i] = ( signbits & ( 1 << i ) ) ? emins : emaxs;
+        far_[i]  = ( signbits & ( 1 << i ) ) ? emaxs : emins;
+    }
+
+    dist1 = normal[0] * near_[0][0] + normal[1] * near_[1][1] + normal[2] * near_[2][2];
+    dist2 = normal[0] * far_[0][0]  + normal[1] * far_[1][1]  + normal[2] * far_[2][2];
+
+    sides = 0;
+
+    if ( dist1 >= planeDist )
+        sides = 1;
+
+    if ( dist2 < planeDist )
+        sides |= 2;
+
+    return sides;
+}
+#else
 /* BoxOnPlaneSide  0x00473a50 */
 __declspec( naked ) int BoxOnPlaneSide( const vec3_t emins, const vec3_t emaxs, const struct cplane_s *p )
 {
@@ -3057,6 +3095,7 @@ Lerror:
 
     AssertMsg( "BoxOnPlaneSide: invalid signbits for plane" );
 }
+#endif
 
 /* PointInArc  0x00473cb0 */
 int PointInArc( const vec3_t pos, float arcRadius, const vec3_t arcOrigin,

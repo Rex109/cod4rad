@@ -8,7 +8,10 @@
 
 
 #define RAD_THREAD_COUNT_MIN        1
-#define RAD_THREAD_COUNT_MAX        4
+#define RAD_THREAD_COUNT_MAX        16
+
+/* Without -gpu the default stays at the original limit of 4 threads */
+#define RAD_THREAD_COUNT_DEFAULT_MAX 4
 
 #define RAD_TRACE_COUNT_MIN         16
 #define RAD_TRACE_COUNT_MAX         512

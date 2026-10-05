@@ -47,7 +47,12 @@
 
 #define LMAP_PACKED_DIR( p )    ( ( p ) >> 23 )
 
+#ifdef _WIN64
+/* 0x600000 in the 32-bit build; an LmapDef_t is bigger with 8 byte pointers */
+#define LIGHTMAP_BYTES_PER_MAP  ( ( size_t )LIGHTMAP_SAMPLE_COUNT * sizeof( LmapDef_t ) )
+#else
 #define LIGHTMAP_BYTES_PER_MAP  0x600000
+#endif
 
 #define LIGHTMAP_PLANE_COUNT    3
 #define LIGHTMAP_PLANE_BYTES    ( LMAP_WIDTH_MIN * LMAP_HEIGHT_MIN * 4 )

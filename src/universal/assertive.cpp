@@ -115,14 +115,18 @@ static int Assertive_WalkStack( char *buffer, int skipFrames, int type )
     memset( s_frames, 0, sizeof( s_frames ) );
     s_frameCount = 0;
 
+#ifdef _WIN64
+    framePtr = NULL;    /* no frame pointer chain to walk on x64 */
+#else
     __asm { mov framePtr, ebp }
+#endif
 
     reachedMain = 0;
 
     for ( frameIndex = 0; frameIndex < skipFrames + ASSERT_MAX_FRAMES; frameIndex++ )
     {
         frame = framePtr;
-        if ( ( unsigned int )frame <= ASSERT_MIN_FRAME_ADDR )
+        if ( ( size_t )frame <= ASSERT_MIN_FRAME_ADDR )
             break;
 
         framePtr   = frame->prev;
@@ -136,7 +140,7 @@ static int Assertive_WalkStack( char *buffer, int skipFrames, int type )
             if ( framePtr == NULL )
                 break;
 
-            delta = ( int )Assertive_WalkStack - ( int )framePtr;
+            delta = ( int )( size_t )Assertive_WalkStack - ( int )( size_t )framePtr;
             if ( delta < -ASSERT_FRAME_RANGE || delta > ASSERT_FRAME_RANGE )
                 break;
         }
@@ -217,7 +221,7 @@ static void Assertive_LoadMapFiles( const char *dir )
             strcpy( mapName, findFileData.cFileName );
             mapName[strlen( mapName ) - 4] = 0;
 
-            Assertive_ParseMapFile( file, ( unsigned int )module, mapName );
+            Assertive_ParseMapFile( file, ( unsigned int )( size_t )module, mapName );
             fclose( file );
         }
     }

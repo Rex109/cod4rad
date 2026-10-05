@@ -11,6 +11,7 @@
 #include "bspfile.h"
 #include "surfaceflags.h"
 #include "cm_tracebox.h"
+#include "threads.h"
 #include "q_shared.h"
 
 
@@ -26,7 +27,7 @@
 #define GEO_VERTEX_SEARCH_DEPTH 2000
 
 #define GEO_HUNK_SIZE           0x80000
-#define GEO_MAX_HUNKS           4
+#define GEO_MAX_HUNKS           THREAD_COUNT_MAX
 
 #define GEO_MAX_SUPERSAMPLE_ALPHA 31
 
@@ -266,6 +267,7 @@ void Geo_CalcSampleAreas( int threads );                              /* 0x0040c
 
 void Geo_CalcRadiosityColors( int threads );                          /* 0x0040c6e0 */
 
+void Geo_PrintGpuProfile( int threads );
 void Geo_BuildTransport( int threads );                               /* 0x0040c700 */
 
 void Geo_ForEachSample( Poly2dGridCallback_t func, int subdivision,

@@ -66,7 +66,7 @@ typedef struct
 
 
 #define MODEL_AABB_MAX_NODES        0x2000
-#define MODEL_AABB_ITEM_STRIDE      64
+#define MODEL_AABB_ITEM_STRIDE      ( ( int )sizeof( ModelCollTri_t ) )   /* 64 on 32-bit */
 #define MODEL_AABB_MIN_PARTITION    0x10
 #define MODEL_AABB_MIN_LEAF_ITEMS   0x20
 
