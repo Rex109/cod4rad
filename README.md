@@ -4,7 +4,7 @@ A 64-bit, GPU-accelerated fork of the `cod4rad.exe` source reconstruction, the l
 
 > [!WARNING]
 > **This project was made entirely with AI.**
-> Every change in this fork, the 64-bit port, the GPU tracer, the threading and the build files, was written by an AI model, and the underlying code is a machine-assisted reconstruction of a decompiled binary. It works on the maps it has been tried on, but it has not been reviewed the way real software should be. **Do not treat it as an example of good programming**, and do not copy its patterns into code you care about. Back up your map files before compiling with it, and compare the output against the original tool if the result matters.
+> Every change in this fork, the 64-bit port, the GPU tracer, the threading and the build files, was written by an AI model, and the underlying code is a machine-assisted reconstruction of a decompiled binary. It works on the maps it has been tried on, but it has not been reviewed the way real software should be. **Do not treat it as an example of good programming**, and do not copy its patterns into code you care about.
 
 ## ✨ What this fork adds
 
