@@ -4,15 +4,20 @@ A source reconstruction of `cod4rad.exe`, the lighting compiler from the Call of
 
 ## Requirements
 
-- Visual Studio 2019 or later with the **x86 (32-bit) C++ toolset** installed
+- Visual Studio 2026 with the **x86 (32-bit) C++ toolset** installed
   (Desktop development with C++ → "MSVC ... C++ x64/x86 build tools")
-- CMake 3.21 or later
+- Premake 5 (bundled as `tools\premake5.exe`)
 
 ## Build
 
 ```
-cmake -B build -A Win32
-cmake --build build --config Release
+generate-buildfiles_vs26.bat
+```
+
+Then open `build\cod4rad.slnx` in Visual Studio 2026 and build the **Win32** platform, or from a command line:
+
+```
+msbuild build\cod4rad.slnx /p:Configuration=Release /p:Platform=Win32
 ```
 
 The executable is written to `bin\cod4rad.exe`.
