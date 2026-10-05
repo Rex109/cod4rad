@@ -1982,8 +1982,7 @@ typedef struct
     GpuTransportJob_t *jobs;
     int                jobCount;
     int                jobMax;
-    GpuRay_t          *rays;
-    vec3_t            *dirs;
+    GpuJob_t          *gpuJobs;
     GpuHit_t          *hits;
 } GpuTransportBatch_t;
 
@@ -2014,11 +2013,10 @@ static void Geo_GpuAllocBatches( int threads )
         batch->jobMax   = jobMax;
         batch->jobCount = 0;
         batch->jobs = ( GpuTransportJob_t * )malloc( jobMax * sizeof( GpuTransportJob_t ) );
-        batch->rays = ( GpuRay_t * )malloc( jobMax * rayCount * sizeof( GpuRay_t ) );
-        batch->dirs = ( vec3_t * )malloc( jobMax * rayCount * sizeof( vec3_t ) );
-        batch->hits = ( GpuHit_t * )malloc( jobMax * rayCount * sizeof( GpuHit_t ) );
+        batch->gpuJobs = ( GpuJob_t * )malloc( jobMax * sizeof( GpuJob_t ) );
+        batch->hits    = ( GpuHit_t * )malloc( jobMax * rayCount * sizeof( GpuHit_t ) );
 
-        if ( !batch->jobs || !batch->rays || !batch->dirs || !batch->hits )
+        if ( !batch->jobs || !batch->gpuJobs || !batch->hits )
             Error( "Couldn't allocate memory for the GPU trace batch\n" );
     }
 }
@@ -2030,8 +2028,7 @@ static void Geo_GpuFreeBatches( void )
     for ( i = 0; i < THREAD_COUNT_MAX; i++ )
     {
         free( gpuBatch[i].jobs );
-        free( gpuBatch[i].rays );
-        free( gpuBatch[i].dirs );
+        free( gpuBatch[i].gpuJobs );
         free( gpuBatch[i].hits );
 
         memset( &gpuBatch[i], 0, sizeof( gpuBatch[i] ) );
@@ -2055,16 +2052,21 @@ static void Geo_GpuFlush( int threadIndex )
     for ( i = 0; i < batch->jobCount; i++ )
     {
         const GpuTransportJob_t *job = &batch->jobs[i];
+        GpuJob_t                *out = &batch->gpuJobs[i];
 
-        Compile_GpuRays( job->pos, job->basis, &batch->rays[i * rayCount],
-                         &batch->dirs[i * rayCount] );
+        Vec3Copy( job->pos, out->pos );
+        out->seed = Compile_GpuNextSeed();
+        Vec3Copy( job->basis[0], out->axis0 );
+        Vec3Copy( job->basis[1], out->axis1 );
+        Vec3Copy( job->basis[2], out->axis2 );
+        out->pad0 = out->pad1 = out->pad2 = 0.0f;
     }
 
     t1 = GpuTrace_Seconds();
     gpuBatchProfile[threadIndex][0] += t1 - t0;
     t0 = t1;
 
-    if ( !GpuTrace_Trace( batch->rays, batch->hits, batch->jobCount * rayCount ) )
+    if ( !GpuTrace_TraceJobs( batch->gpuJobs, batch->jobCount, batch->hits ) )
         Error( "The GPU stopped responding while tracing.  Run again without -gpu.\n" );
 
     t1 = GpuTrace_Seconds();
@@ -2096,12 +2098,12 @@ static void Geo_GpuFlush( int threadIndex )
         Vec3Scale( job->ds, radius, axis0 );
         Vec3Scale( job->dt, radius, axis1 );
 
-        Compile_SetGpuTrace( threadIndex, &batch->dirs[i * rayCount], &batch->hits[i * rayCount] );
+        Compile_SetGpuTrace( threadIndex, &batch->hits[i * rayCount] );
 
         traced = Compile_TraceSubSample( threadIndex, job->lightType, job->pos, axis0, axis1,
                                          job->basis, area, subArea, &job->subSample );
 
-        Compile_SetGpuTrace( threadIndex, NULL, NULL );
+        Compile_SetGpuTrace( threadIndex, NULL );
 
         if ( !traced )
         {
@@ -2126,7 +2128,7 @@ void Geo_PrintGpuProfile( int threads )
         for ( j = 0; j < 3; j++ )
             total[j] += gpuBatchProfile[i][j];
 
-    Print( "GPU: time over all %i threads: choosing ray directions %.1fs, GPU call %.1fs,"
+    Print( "GPU: time over all %i threads: preparing jobs %.1fs, GPU call %.1fs,"
            " using the results %.1fs\n", threads, total[0], total[1], total[2] );
 
     memset( gpuBatchProfile, 0, sizeof( gpuBatchProfile ) );
@@ -2360,6 +2362,9 @@ static void Geo_GpuTransportChunk( int chunkIndex, int threadIndex )
 void Geo_BuildTransport( int threads )
 {
     /* Relighting reuses the stored radiosity transport and never traces it */
+    if ( !options.relight && GpuTransport_Enabled() && !Compile_GpuUploadDirections() )
+        Error( "Couldn't send the radiosity directions to the GPU.  Run again without -gpu.\n" );
+
     if ( !options.relight && GpuTransport_Enabled() )
     {
         Geo_GpuAllocBatches( threads );

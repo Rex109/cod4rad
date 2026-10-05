@@ -505,7 +505,7 @@ void Compile_InitAllocators( int threads )
 }
 
 static int Compile_ResolveTransport( GeoTrace_t &trace, const vec3_t traceStart,
-                                     const vec3_t traceEnd, const vec3_t dir,
+                                     const vec3_t traceEnd, const vec3_t dir, int gpuFlags,
                                      qboolean pointFilter, TransportHit_t *hits,
                                      int *hitCount, vec3_t hitPos, vec3_t hitNormal );
 
@@ -531,17 +531,20 @@ int Compile_TraceTransport( const vec3_t start, const vec3_t dir, float distance
     Geo_SetupTrace( traceStart, traceEnd, NULL, NULL, &trace );
     Geo_TraceRay( &trace );
 
-    return Compile_ResolveTransport( trace, traceStart, traceEnd, dir, pointFilter,
+    return Compile_ResolveTransport( trace, traceStart, traceEnd, dir, 0, pointFilter,
                                      hits, hitCount, hitPos, hitNormal );
 }
 
 /* Turns a finished trace into lightmap transport hits.  Shared by the CPU trace
    and the GPU path, which fabricates the trace from its single hit. */
 static int Compile_ResolveTransport( GeoTrace_t &trace, const vec3_t traceStart,
-                                     const vec3_t traceEnd, const vec3_t dir,
+                                     const vec3_t traceEnd, const vec3_t dir, int gpuFlags,
                                      qboolean pointFilter, TransportHit_t *hits,
                                      int *hitCount, vec3_t hitPos, vec3_t hitNormal )
 {
+    /* The CPU path passes the ray direction.  The GPU path (dir == NULL) passes the two
+       things the direction is used for: whether the ray pointed down and whether it
+       hit a back face. */
     const GeoHit_t     *last;
     const GeoTriangle_t *tri;
     TransportHit_t     *out = hits;
@@ -570,7 +573,7 @@ static int Compile_ResolveTransport( GeoTrace_t &trace, const vec3_t traceStart,
 
     if ( tri->mskMtl->material->surfaceFlags & SURF_SKY )
     {
-        if ( 0.0f > dir[2] )
+        if ( dir ? ( 0.0f > dir[2] ) : ( ( gpuFlags & GPUHIT_DOWNWARD ) != 0 ) )
             return TRANSPORT_MISS;
 
         if ( hitNormal )
@@ -586,9 +589,10 @@ static int Compile_ResolveTransport( GeoTrace_t &trace, const vec3_t traceStart,
     }
 
     {
-        float facing = Vec3Dot( tri->normal, dir );
+        bool backface = dir ? !( Vec3Dot( tri->normal, dir ) < 0.0f )
+                            : ( ( gpuFlags & GPUHIT_BACKFACE ) != 0 );
 
-        if ( !( facing < 0.0f ) )
+        if ( backface )
         {
             if ( !tri->groundType )
                 Geo_ClassifyGroundTriangle( ( GeoTriangle_t * )tri );
@@ -1109,7 +1113,6 @@ static int Compile_TraceRadiositySample( int index, const vec3_t pos,
 
 /* Per thread: when set, Compile_TraceSubSample uses these traced results
    instead of tracing on the CPU. */
-static const vec3_t   *compileGpuDirs[THREAD_COUNT_MAX];
 static const GpuHit_t *compileGpuHits[THREAD_COUNT_MAX];
 
 /* Seconds spent per thread in the stages of Compile_TraceSubSample on the GPU path */
@@ -1132,54 +1135,45 @@ void Compile_PrintGpuProfile( int threads )
     memset( compileGpuProfile, 0, sizeof( compileGpuProfile ) );
 }
 
-/* Compile_GpuRays */
-void Compile_GpuRays( const vec3_t pos, const vec3_t *axis, GpuRay_t *rays, vec3_t *dirs )
+/* Compile_GpuUploadDirections: the GPU jitters its rays around the same hemisphere
+   points the CPU path uses */
+bool Compile_GpuUploadDirections( void )
 {
-    int i;
+    float dirX[RAD_TRACE_COUNT_MAX];
+    float dirY[RAD_TRACE_COUNT_MAX];
+    float jitter[RAD_TRACE_COUNT_MAX];
+    int   i;
 
     for ( i = 0; i < options.radiosityTraceCount; i++ )
     {
-        vec3_t start;
-        vec3_t end;
-
-        Compile_RadiosityDir( i, axis, dirs[i] );
-
-        start[0] = pos[0] + dirs[i][0] * TRANSPORT_START_OFFSET;
-        start[1] = pos[1] + dirs[i][1] * TRANSPORT_START_OFFSET;
-        start[2] = pos[2] + dirs[i][2] * TRANSPORT_START_OFFSET;
-
-        end[0] = dirs[i][0] * RADIOSITY_TRACE_DISTANCE + start[0];
-        end[1] = dirs[i][1] * RADIOSITY_TRACE_DISTANCE + start[1];
-        end[2] = dirs[i][2] * RADIOSITY_TRACE_DISTANCE + start[2];
-
-        rays[i].start[0] = start[0]; rays[i].start[1] = start[1]; rays[i].start[2] = start[2];
-        rays[i].end[0]   = end[0];   rays[i].end[1]   = end[1];   rays[i].end[2]   = end[2];
+        dirX[i]   = radiositySamples[i].dir[0];
+        dirY[i]   = radiositySamples[i].dir[1];
+        jitter[i] = radiositySamples[i].jitterRadius;
     }
+
+    return GpuTrace_SetDirections( dirX, dirY, jitter, options.radiosityTraceCount ) != 0;
+}
+
+/* Compile_GpuNextSeed: every job needs its own jitter seed */
+unsigned Compile_GpuNextSeed( void )
+{
+    static volatile LONG counter;
+
+    return ( unsigned )InterlockedIncrement( &counter );
 }
 
 /* Compile_SetGpuTrace */
-void Compile_SetGpuTrace( int threadIndex, const vec3_t *dirs, const GpuHit_t *hits )
+void Compile_SetGpuTrace( int threadIndex, const GpuHit_t *hits )
 {
-    compileGpuDirs[threadIndex] = dirs;
     compileGpuHits[threadIndex] = hits;
 }
 
 /* Compile_ResolveGpuHit */
-static int Compile_ResolveGpuHit( const vec3_t pos, const vec3_t dir,
-                                  const GpuHit_t *gpuHit, TransportHit_t *hits,
-                                  int *hitCount )
+static int Compile_ResolveGpuHit( const vec3_t pos, const GpuHit_t *gpuHit,
+                                  TransportHit_t *hits, int *hitCount )
 {
     GeoTrace_t trace;
-    vec3_t     traceStart;
-    vec3_t     traceEnd;
-
-    traceStart[0] = pos[0] + dir[0] * TRANSPORT_START_OFFSET;
-    traceStart[1] = pos[1] + dir[1] * TRANSPORT_START_OFFSET;
-    traceStart[2] = pos[2] + dir[2] * TRANSPORT_START_OFFSET;
-
-    traceEnd[0] = dir[0] * RADIOSITY_TRACE_DISTANCE + traceStart[0];
-    traceEnd[1] = dir[1] * RADIOSITY_TRACE_DISTANCE + traceStart[1];
-    traceEnd[2] = dir[2] * RADIOSITY_TRACE_DISTANCE + traceStart[2];
+    int        flags = 0;
 
     trace.result.hitCount = 0;
     trace.result.frac     = 1.0f;
@@ -1188,8 +1182,10 @@ static int Compile_ResolveGpuHit( const vec3_t pos, const vec3_t dir,
     {
         GeoHit_t *hit = &trace.result.hits[0];
 
+        flags = gpuHit->tri & ~GPUHIT_TRI_MASK;
+
         hit->geoType   = TRACE_HIT_WORLD_GEO;
-        hit->tri       = &geoTris[gpuHit->tri];
+        hit->tri       = &geoTris[gpuHit->tri & GPUHIT_TRI_MASK];
         hit->u         = gpuHit->u;
         hit->v         = gpuHit->v;
         hit->frac      = gpuHit->frac;
@@ -1199,9 +1195,80 @@ static int Compile_ResolveGpuHit( const vec3_t pos, const vec3_t dir,
         trace.result.frac     = gpuHit->frac;
     }
 
-    return Compile_ResolveTransport( trace, traceStart, traceEnd, dir,
+    /* The start and end points are only needed to report a hit position, which
+       radiosity traces never ask for */
+    return Compile_ResolveTransport( trace, pos, pos, NULL, flags,
                                      options.traceFilterWidth == TRACE_FILTER_POINT,
                                      hits, hitCount, NULL, NULL );
+}
+
+/* Compile_MergeBounces: adds all the bounce hits of one sub-sample to a sample in a
+   single pass.  The sample's list is kept sorted by key, so finding the entries that
+   already exist is a merge instead of a search per hit. */
+static void Compile_MergeBounces( int threadIndex, LmapDef_t *toSample,
+                                  BounceRef_t *pending, int pendingCount )
+{
+    SampleVars_t *vars = toSample->vars;
+    BounceRef_t  *list;
+    int           existing;
+    int           newCount;
+    int           e;
+    int           i;
+    int           j;
+    int           k;
+
+    /* The hits arrive almost sorted already, so an insertion sort is enough */
+    for ( i = 1; i < pendingCount; i++ )
+    {
+        BounceRef_t item = pending[i];
+
+        for ( j = i - 1; j >= 0 && pending[j].packed > item.packed; j-- )
+            pending[j + 1] = pending[j];
+
+        pending[j + 1] = item;
+    }
+
+    existing = vars->bounceCount;
+    list     = vars->bounces;
+    newCount = 0;
+    e        = 0;
+
+    /* Hits that already have an entry add to it; the rest are kept in pending */
+    for ( i = 0; i < pendingCount; i++ )
+    {
+        while ( e < existing && list[e].packed < pending[i].packed )
+            e++;
+
+        if ( e < existing && list[e].packed == pending[i].packed )
+            list[e].weight += pending[i].weight;
+        else if ( newCount && pending[newCount - 1].packed == pending[i].packed )
+            pending[newCount - 1].weight += pending[i].weight;
+        else
+            pending[newCount++] = pending[i];
+    }
+
+    if ( !newCount )
+        return;
+
+    vars->bounces = ( BounceRef_t * )
+        BlockAlloc_Realloc( &compileGlob.bounceAlloc[threadIndex], vars->bounces,
+                            existing, newCount );
+    list = vars->bounces;
+
+    /* Merge the new entries in from the back, keeping the list sorted */
+    i = existing - 1;
+    j = newCount - 1;
+    k = existing + newCount - 1;
+
+    while ( j >= 0 )
+    {
+        if ( i >= 0 && list[i].packed > pending[j].packed )
+            list[k--] = list[i--];
+        else
+            list[k--] = pending[j--];
+    }
+
+    vars->bounceCount = existing + newCount;
 }
 
 /* Compile_AddBounce  0x00406f90 */
@@ -1256,6 +1323,8 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
     int           i;
     int           slot;
 
+    BounceRef_t pending[RAD_TRACE_COUNT_MAX * 4];   /* GPU path only */
+    int         pendingCount = 0;
     double prof0 = 0.0;
     double prof1 = 0.0;
     double *prof = compileGpuHits[threadIndex] ? compileGpuProfile[threadIndex] : NULL;
@@ -1279,8 +1348,7 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
         for ( i = 0; i < options.radiosityTraceCount; i++ )
         {
             if ( compileGpuHits[threadIndex] )
-                results[i] = Compile_ResolveGpuHit( pos, compileGpuDirs[threadIndex][i],
-                                                    &compileGpuHits[threadIndex][i],
+                results[i] = Compile_ResolveGpuHit( pos, &compileGpuHits[threadIndex][i],
                                                     compileTraceHits[threadIndex][i],
                                                     &hitCounts[i] );
             else
@@ -1333,11 +1401,30 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
                 {
                     const TransportHit_t *hit = &compileTraceHits[threadIndex][i][j];
 
-                    Compile_AddBounce( threadIndex, subSample->sample,
-                                       hit->weight * traceScale, i, hit );
+                    if ( prof )
+                    {
+                        float weight = hit->weight * traceScale;
+
+                        if ( 0.0f < weight )
+                        {
+                            pending[pendingCount].weight = weight;
+                            pending[pendingCount].packed =
+                                ( ( ( ( ( ( unsigned )i << 5 ) | ( hit->lmapIndex & LIGHTMAP_NONE ) )
+                                       << 9 ) | ( hit->t & 0x1ff ) ) << 9 ) | ( hit->s & 0x1ff );
+                            pendingCount++;
+                        }
+                    }
+                    else
+                    {
+                        Compile_AddBounce( threadIndex, subSample->sample,
+                                           hit->weight * traceScale, i, hit );
+                    }
                 }
             }
         }
+
+        if ( prof )
+            Compile_MergeBounces( threadIndex, subSample->sample, pending, pendingCount );
     }
 
     if ( prof )

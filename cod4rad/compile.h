@@ -131,13 +131,14 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
                                  const vec3_t *axis, float scale, float subAreaX2,
                                  struct LmapSubSample_s *subSample );   /* 0x004083a0 */
 
-/* GPU path: Compile_GpuRays picks the radiosity directions for one sub-sample and
-   fills in the rays to trace.  Compile_SetGpuTrace then makes the next
-   Compile_TraceSubSample on that thread use the traced results (pass NULLs to
-   go back to tracing on the CPU). */
-void Compile_GpuRays( const vec3_t pos, const vec3_t *axis, GpuRay_t *rays, vec3_t *dirs );
-void Compile_PrintGpuProfile( int threads );
-void Compile_SetGpuTrace( int threadIndex, const vec3_t *dirs, const GpuHit_t *hits );
+/* GPU path.  Compile_GpuUploadDirections gives the GPU the radiosity directions to
+   jitter its rays around; Compile_GpuNextSeed gives each job its own jitter seed;
+   Compile_SetGpuTrace then makes the next Compile_TraceSubSample on that thread use
+   the traced hits (pass NULL to go back to tracing on the CPU). */
+bool     Compile_GpuUploadDirections( void );
+unsigned Compile_GpuNextSeed( void );
+void     Compile_PrintGpuProfile( int threads );
+void     Compile_SetGpuTrace( int threadIndex, const GpuHit_t *hits );
 
 void RunLightCompile( int threadCount );        /* 0x004080b0 */
 

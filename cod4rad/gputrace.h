@@ -49,19 +49,29 @@ typedef struct
     const unsigned   *masks;     int maskWordCount;
 } GpuScene_t;
 
+/* One lightmap sub-sample: where it is and the surface basis its rays are built around.
+   The GPU picks the radiosity ray directions itself (jittered around the directions
+   given to GpuTrace_SetDirections), so a job is all that has to be uploaded. */
 typedef struct
 {
-    float start[3];
-    float end[3];
-} GpuRay_t;
+    float    pos[3];
+    unsigned seed;          /* different for every job; drives the jitter */
+    float    axis0[3]; float pad0;
+    float    axis1[3]; float pad1;
+    float    axis2[3]; float pad2;   /* the surface normal */
+} GpuJob_t;                 /* 64 bytes */
 
 typedef struct
 {
-    int   tri;              /* index into the scene triangles, -1 for a miss */
+    int   tri;              /* -1 for a miss, otherwise the triangle index OR'd with flags below */
     float u;
     float v;
-    float frac;             /* 0..1 along start->end */
+    float frac;             /* 0..1 along the ray */
 } GpuHit_t;
+
+#define GPUHIT_TRI_MASK     0x0fffffff
+#define GPUHIT_BACKFACE     0x10000000      /* the ray hit the back of the triangle */
+#define GPUHIT_DOWNWARD     0x20000000      /* the ray pointed down (dir z < 0) */
 
 
 /* Returns 0 on failure and writes a message to err. */
@@ -70,9 +80,14 @@ void GpuTrace_Shutdown( void );
 
 const char *GpuTrace_AdapterName( void );
 
-/* Finds, for every ray, the nearest solid triangle.  Safe to call from
-   several threads at once.  Returns 0 if the GPU failed (e.g. device removed). */
-int  GpuTrace_Trace( const GpuRay_t *rays, GpuHit_t *hits, int count );
+/* The hemisphere directions every job traces: (x, y) of each unit-hemisphere point
+   and the jitter radius around it.  Must be called before GpuTrace_TraceJobs. */
+int  GpuTrace_SetDirections( const float *dirX, const float *dirY, const float *jitter, int count );
+
+/* Traces directionCount rays for each job and writes jobCount * directionCount hits,
+   job-major.  Safe to call from several threads at once.  Returns 0 if the GPU
+   failed (e.g. device removed). */
+int  GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits );
 
 /* Monotonic clock in seconds, for the -gpu timing report */
 double GpuTrace_Seconds( void );

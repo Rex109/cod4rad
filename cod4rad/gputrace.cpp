@@ -13,6 +13,8 @@
 #pragma comment( lib, "d3dcompiler.lib" )
 
 #define GPU_MAX_RAYS_PER_DISPATCH   ( 1 << 18 )
+#define GPU_MIN_DIRECTIONS          16
+#define GPU_MAX_JOBS_PER_DISPATCH   ( GPU_MAX_RAYS_PER_DISPATCH / GPU_MIN_DIRECTIONS )
 #define GPU_GROUP_SIZE              64
 
 
@@ -26,7 +28,7 @@ struct Leaf  { int count; int first; };
 struct Tri   { float3 v0; float nx; float3 v1; float ny; float3 v2; float nz;
                float2 st0; float2 st1; float2 st2; int mtl; int pad; };
 struct Mtl   { uint offset; uint width; uint height; uint pad; };
-struct Ray   { float3 start; float p0; float3 end; float p1; };
+struct Job   { float3 pos; uint seed; float3 axis0; float p0; float3 axis1; float p1; float3 axis2; float p2; };
 struct Hit   { int tri; float u; float v; float frac; };
 
 StructuredBuffer<Node>  gNodes   : register( t0 );
@@ -35,10 +37,18 @@ StructuredBuffer<int>   gTriRefs : register( t2 );
 StructuredBuffer<Tri>   gTris    : register( t3 );
 StructuredBuffer<Mtl>   gMtls    : register( t4 );
 StructuredBuffer<uint>  gMasks   : register( t5 );
-StructuredBuffer<Ray>   gRays    : register( t6 );
+StructuredBuffer<Job>   gJobs    : register( t6 );
+StructuredBuffer<float4> gDirs   : register( t7 );     // x, y, jitter radius
 RWStructuredBuffer<Hit> gHits    : register( u0 );
 
-cbuffer Params : register( b0 ) { uint gRayCount; uint gPad0; uint gPad1; uint gPad2; };
+cbuffer Params : register( b0 ) { uint gRayCount; uint gTraceCount; uint gPad1; uint gPad2; };
+
+uint Pcg( uint v )
+{
+    uint s = v * 747796405u + 2891336453u;
+    uint w = ( ( s >> ( ( s >> 28u ) + 4u ) ) ^ s ) * 277803737u;
+    return ( w >> 22u ) ^ w;
+}
 
 #define STACK_SIZE 96
 
@@ -103,9 +113,48 @@ void main( uint3 id : SV_DispatchThreadID )
 {
     if ( id.x >= gRayCount ) return;
 
-    Ray ray = gRays[id.x];
-    float3 start = ray.start;
-    float3 end = ray.end;
+    // Build this ray the way Compile_RadiosityDir does on the CPU
+    uint jobIndex = id.x / gTraceCount;
+    uint dirIndex = id.x - jobIndex * gTraceCount;
+    Job job = gJobs[jobIndex];
+    float4 sampleDir = gDirs[dirIndex];
+
+    uint rng = Pcg( job.seed * 2654435769u + dirIndex * 2246822519u + 1750411684u );
+    float u = 0.0;
+    float v = 0.0;
+    float lenSq = 2.0;
+
+    [loop] for ( int tries = 0; tries < 32 && lenSq > 1.0; tries++ )
+    {
+        rng = Pcg( rng );
+        u = (float)( rng >> 8 ) * ( 2.0 / 16777216.0 ) - 1.0;
+        rng = Pcg( rng );
+        v = (float)( rng >> 8 ) * ( 2.0 / 16777216.0 ) - 1.0;
+        lenSq = u * u + v * v;
+    }
+
+    if ( lenSq > 1.0 ) { u = 0.0; v = 0.0; }
+
+    float lx = u * sampleDir.z + sampleDir.x;
+    float ly = v * sampleDir.z + sampleDir.y;
+    float lz;
+    lenSq = lx * lx + ly * ly;
+
+    if ( lenSq > 1.0 )
+    {
+        float inv = 1.0 / sqrt( lenSq );
+        lx *= inv;
+        ly *= inv;
+        lz = 0.001;
+    }
+    else
+    {
+        lz = sqrt( 1.0 - lenSq );
+    }
+
+    float3 dir = job.axis0 * lx + job.axis1 * ly + job.axis2 * lz;
+    float3 start = job.pos + dir * 0.125;
+    float3 end = start + dir * 262144.0;
     float3 delta = end - start;
 
     float bestFrac = 1.0;
@@ -183,6 +232,13 @@ void main( uint3 id : SV_DispatchThreadID )
 
     Hit h;
     h.tri = bestTri;
+    if ( bestTri >= 0 )
+    {
+        Tri hitTri = gTris[bestTri];
+        float facing = dot( float3( hitTri.nx, hitTri.ny, hitTri.nz ), dir );
+        if ( !( facing < 0.0 ) ) h.tri |= 0x10000000;
+        if ( dir.z < 0.0 ) h.tri |= 0x20000000;
+    }
     h.u = bestU;
     h.v = bestV;
     h.frac = bestFrac;
@@ -200,8 +256,11 @@ static struct
     ID3D11Buffer              *sceneBuffers[6];
     ID3D11ShaderResourceView  *sceneViews[6];
 
-    ID3D11Buffer              *rayBuffer;
-    ID3D11ShaderResourceView  *rayView;
+    ID3D11Buffer              *jobBuffer;
+    ID3D11ShaderResourceView  *jobView;
+    ID3D11Buffer              *dirBuffer;
+    ID3D11ShaderResourceView  *dirView;
+    int                        directionCount;
     ID3D11Buffer              *hitBuffer;
     ID3D11UnorderedAccessView *hitView;
     ID3D11Buffer              *hitStaging;
@@ -358,17 +417,17 @@ int GpuTrace_Init( const GpuScene_t *scene, char *err, int errSize )
         }
     }
 
-    /* Ray input (CPU write) */
+    /* Job input (CPU write) */
     memset( &desc, 0, sizeof( desc ) );
-    desc.ByteWidth           = GPU_MAX_RAYS_PER_DISPATCH * 32;
+    desc.ByteWidth           = GPU_MAX_JOBS_PER_DISPATCH * sizeof( GpuJob_t );
     desc.Usage               = D3D11_USAGE_DYNAMIC;
     desc.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
     desc.CPUAccessFlags      = D3D11_CPU_ACCESS_WRITE;
     desc.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-    desc.StructureByteStride = 32;
-    hr = gpu.device->CreateBuffer( &desc, NULL, &gpu.rayBuffer );
+    desc.StructureByteStride = sizeof( GpuJob_t );
+    hr = gpu.device->CreateBuffer( &desc, NULL, &gpu.jobBuffer );
     if ( SUCCEEDED( hr ) )
-        hr = gpu.device->CreateShaderResourceView( gpu.rayBuffer, NULL, &gpu.rayView );
+        hr = gpu.device->CreateShaderResourceView( gpu.jobBuffer, NULL, &gpu.jobView );
 
     /* Hit output (GPU write) */
     if ( SUCCEEDED( hr ) )
@@ -426,8 +485,10 @@ void GpuTrace_Shutdown( void )
     SafeRelease( gpu.hitStaging );
     SafeRelease( gpu.hitView );
     SafeRelease( gpu.hitBuffer );
-    SafeRelease( gpu.rayView );
-    SafeRelease( gpu.rayBuffer );
+    SafeRelease( gpu.dirView );
+    SafeRelease( gpu.dirBuffer );
+    SafeRelease( gpu.jobView );
+    SafeRelease( gpu.jobBuffer );
 
     for ( i = 0; i < 6; i++ )
     {
@@ -451,56 +512,84 @@ const char *GpuTrace_AdapterName( void )
     return gpu.adapterName;
 }
 
-static int TraceSlice( const GpuRay_t *rays, GpuHit_t *hits, int count )
+int GpuTrace_SetDirections( const float *dirX, const float *dirY, const float *jitter, int count )
+{
+    float *packed;
+    int    i;
+    HRESULT hr;
+
+    if ( count < GPU_MIN_DIRECTIONS || count > 512 )
+        return 0;
+
+    packed = new float[count * 4];
+
+    for ( i = 0; i < count; i++ )
+    {
+        packed[i * 4 + 0] = dirX[i];
+        packed[i * 4 + 1] = dirY[i];
+        packed[i * 4 + 2] = jitter[i];
+        packed[i * 4 + 3] = 0.0f;
+    }
+
+    SafeRelease( gpu.dirView );
+    SafeRelease( gpu.dirBuffer );
+
+    hr = CreateStructured( packed, 16, count, &gpu.dirBuffer, &gpu.dirView );
+
+    delete[] packed;
+
+    if ( FAILED( hr ) )
+        return 0;
+
+    gpu.directionCount = count;
+
+    return 1;
+}
+
+static int TraceSlice( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
-    ID3D11ShaderResourceView *views[7];
-    ID3D11ShaderResourceView *noViews[7] = { 0 };
+    ID3D11ShaderResourceView *views[8];
+    ID3D11ShaderResourceView *noViews[8] = { 0 };
     ID3D11UnorderedAccessView *uav = gpu.hitView;
     ID3D11UnorderedAccessView *noUav = NULL;
     ID3D11Buffer *cb = gpu.params;
     D3D11_BOX box;
+    int rayCount = jobCount * gpu.directionCount;
     int i;
 
-    /* Rays: 24 bytes of data in a 32 byte record */
-    if ( FAILED( gpu.context->Map( gpu.rayBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
+    if ( FAILED( gpu.context->Map( gpu.jobBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
         return 0;
 
-    for ( i = 0; i < count; i++ )
-    {
-        float *dst = ( float * )( ( char * )mapped.pData + i * 32 );
-
-        dst[0] = rays[i].start[0]; dst[1] = rays[i].start[1]; dst[2] = rays[i].start[2];
-        dst[3] = 0.0f;
-        dst[4] = rays[i].end[0];   dst[5] = rays[i].end[1];   dst[6] = rays[i].end[2];
-        dst[7] = 0.0f;
-    }
-    gpu.context->Unmap( gpu.rayBuffer, 0 );
+    memcpy( mapped.pData, jobs, ( size_t )jobCount * sizeof( GpuJob_t ) );
+    gpu.context->Unmap( gpu.jobBuffer, 0 );
 
     if ( SUCCEEDED( gpu.context->Map( gpu.params, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
     {
         unsigned *p = ( unsigned * )mapped.pData;
 
-        p[0] = ( unsigned )count;
-        p[1] = p[2] = p[3] = 0;
+        p[0] = ( unsigned )rayCount;
+        p[1] = ( unsigned )gpu.directionCount;
+        p[2] = p[3] = 0;
         gpu.context->Unmap( gpu.params, 0 );
     }
 
     for ( i = 0; i < 6; i++ )
         views[i] = gpu.sceneViews[i];
-    views[6] = gpu.rayView;
+    views[6] = gpu.jobView;
+    views[7] = gpu.dirView;
 
     gpu.context->CSSetShader( gpu.shader, NULL, 0 );
-    gpu.context->CSSetShaderResources( 0, 7, views );
+    gpu.context->CSSetShaderResources( 0, 8, views );
     gpu.context->CSSetUnorderedAccessViews( 0, 1, &uav, NULL );
     gpu.context->CSSetConstantBuffers( 0, 1, &cb );
 
-    gpu.context->Dispatch( ( UINT )( ( count + GPU_GROUP_SIZE - 1 ) / GPU_GROUP_SIZE ), 1, 1 );
+    gpu.context->Dispatch( ( UINT )( ( rayCount + GPU_GROUP_SIZE - 1 ) / GPU_GROUP_SIZE ), 1, 1 );
 
-    gpu.context->CSSetShaderResources( 0, 7, noViews );
+    gpu.context->CSSetShaderResources( 0, 8, noViews );
     gpu.context->CSSetUnorderedAccessViews( 0, 1, &noUav, NULL );
 
-    box.left  = 0; box.right  = ( UINT )count * sizeof( GpuHit_t );
+    box.left  = 0; box.right  = ( UINT )rayCount * sizeof( GpuHit_t );
     box.top   = 0; box.bottom = 1;
     box.front = 0; box.back   = 1;
     gpu.context->CopySubresourceRegion( gpu.hitStaging, 0, 0, 0, 0, gpu.hitBuffer, 0, &box );
@@ -508,7 +597,7 @@ static int TraceSlice( const GpuRay_t *rays, GpuHit_t *hits, int count )
     /* Map blocks until the dispatch has finished */
     if ( SUCCEEDED( gpu.context->Map( gpu.hitStaging, 0, D3D11_MAP_READ, 0, &mapped ) ) )
     {
-        memcpy( hits, mapped.pData, ( size_t )count * sizeof( GpuHit_t ) );
+        memcpy( hits, mapped.pData, ( size_t )rayCount * sizeof( GpuHit_t ) );
         gpu.context->Unmap( gpu.hitStaging, 0 );
         return 1;
     }
@@ -543,34 +632,40 @@ void GpuTrace_Stats( double *rays, double *busySeconds, double *waitSeconds )
     *waitSeconds = gpu.statWait;
 }
 
-int GpuTrace_Trace( const GpuRay_t *rays, GpuHit_t *hits, int count )
+int GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
 {
     int    ok = 1;
-    int    total = count;
+    int    perSlice;
     double queued = GpuSeconds();
     double started;
+    double rays = ( double )jobCount * gpu.directionCount;
+
+    if ( !gpu.directionCount )
+        return 0;
+
+    perSlice = GPU_MAX_RAYS_PER_DISPATCH / gpu.directionCount;
 
     EnterCriticalSection( &gpu.lock );
 
     started = GpuSeconds();
     gpu.statWait += started - queued;
 
-    while ( count > 0 )
+    while ( jobCount > 0 )
     {
-        int slice = count < GPU_MAX_RAYS_PER_DISPATCH ? count : GPU_MAX_RAYS_PER_DISPATCH;
+        int slice = jobCount < perSlice ? jobCount : perSlice;
 
-        if ( !TraceSlice( rays, hits, slice ) )
+        if ( !TraceSlice( jobs, slice, hits ) )
         {
             ok = 0;
             break;
         }
 
-        rays  += slice;
-        hits  += slice;
-        count -= slice;
+        jobs     += slice;
+        hits     += slice * gpu.directionCount;
+        jobCount -= slice;
     }
 
-    gpu.statRays += total;
+    gpu.statRays += rays;
     gpu.statBusy += GpuSeconds() - started;
 
     LeaveCriticalSection( &gpu.lock );
