@@ -39,7 +39,7 @@ On one test map (about 5.4 billion rays, RTX 5080, 16 threads) the light transpo
 - 🧱 Still on the CPU: sun, point light and emissive brush shadows, and the rest of the light grid and model lighting.
 - `-Threads N` accepts 1 to 16. Without it, the CPU path uses up to 4 threads like the original, and `-gpu` uses every core (up to 16), since the CPU side is what keeps the GPU fed.
 
-## 💡 Emissive brushes
+## 💡 Emissive brushes/Area lights
 <img width="100%" alt="iw3mp_fPtZ12n4mL" src="https://github.com/user-attachments/assets/9ea9251c-7a50-4600-936b-349c3df2f322" />
 
 Make a brush part of a brush entity (for example `script_brushmodel`) and give it these keys in Radiant. When cod4rad runs, the brush's visible faces give off light, with no material changes.
