@@ -1,5 +1,10 @@
-# x64-cod4rad
+[![Personal Discord](https://img.shields.io/discord/953653773962739793?color=%237289DA&label=Personal%20Discord&logo=discord&logoColor=%23FFFFFF)](https://discord.gg/QDYk75vBBk)
+[![ManyAsset](https://img.shields.io/discord/585171589750849538?color=%23FF8711&label=ManyAsset&logo=discord&logoColor=%23FFFFFF)](https://discord.gg/v2TWkeR)
 
+# x64-CoD4Rad
+<img width="1820" height="396" alt="logo" src="https://github.com/user-attachments/assets/10edfe8f-ade1-4058-8f39-e3ea0f991042" />
+<p align="center"><sub>Let there be light!</sub></p>
+<br>
 A 64-bit, GPU-accelerated fork of the `cod4rad.exe` source reconstruction, the lighting compiler from the Call of Duty 4 mod tools (originally recovered from the shipped 2007 binary).
 
 > [!WARNING]
