@@ -7,7 +7,12 @@
 #include "com_vector.h"
 
 
+#ifdef _WIN64
+/* The 32-bit build keeps the original limit; its arrays wouldn't fit in 32-bit memory */
+#define MAX_MAP_LIGHTGRID_POINTS        0x4000000       /* 67 million */
+#else
 #define MAX_MAP_LIGHTGRID_POINTS        0x100000
+#endif
 
 #define LIGHTGRID_SPACING_XY            32
 #define LIGHTGRID_SPACING_Z             64

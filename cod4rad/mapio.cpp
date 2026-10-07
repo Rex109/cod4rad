@@ -9,6 +9,7 @@
 #include "com_memory.h"
 #include "maskedmaterial.h"
 #include "pointlights.h"
+#include "emissive.h"
 #include "lighting.h"
 #include "geometry.h"
 #include "bspfile.h"
@@ -471,6 +472,95 @@ static void MapIO_AddWorldspawn( Entity_t *ent )
     MapIO_AddModelSurfaces( ent, 0 );
 }
 
+/* ---- Emissive brushes ------------------------------------------------------
+   A brush entity with an "_emit_color" key gives off light from its visible faces.
+   The faces glow with the emit colour themselves, and they are area lights for
+   everything around them (see emissive.cpp): the light leaves each face along its
+   outward normal and is shadowed like any other light.
+
+   Keys:  _emit_color      r g b (scaled so the brightest component is 1, like _color)
+          _emit_intensity  default 1.  What a very large face gives a surface right
+                           next to it.
+          _emit_radius     how far the light reaches, default 512
+          _emit_samples    how many points on the brush are sampled for each lit point
+                           (default 16): more is smoother, and slower */
+
+static void MapIO_AddEmissiveBrush( const Entity_t *ent, int modelIndex, int firstTri, int endTri )
+{
+    vec3_t color;
+    float  intensity;
+    float  radius;
+    int    sampleCount;
+    int    t;
+
+    if ( !MapIO_VectorForKey( ent, "_emit_color", color ) )
+        return;
+
+    intensity = MapIO_FloatForKey( ent, "_emit_intensity" );
+
+    if ( !( 0.0f < intensity ) )
+        intensity = 1.0f;
+
+    radius = MapIO_FloatForKey( ent, "_emit_radius" );
+
+    if ( !( 0.0f < radius ) )
+        radius = EMISSIVE_DEFAULT_RADIUS;
+
+    sampleCount = MapIO_IntForKey( ent, "_emit_samples" );
+
+    if ( sampleCount < 1 )
+        sampleCount = EMISSIVE_DEFAULT_SAMPLES;
+
+    if ( sampleCount > EMISSIVE_MAX_SAMPLES )
+        sampleCount = EMISSIVE_MAX_SAMPLES;
+
+    Vec3ScaleToMax( color );
+
+    color[0] *= intensity;
+    color[1] *= intensity;
+    color[2] *= intensity;
+
+    /* Light colours are converted to linear, as the point lights' are */
+    Lighting_Vec3GammaToLinear( color );
+
+    /* The faces are area lights for everything around them (not for themselves) */
+    Emissive_BeginBrush( color, radius, sampleCount );
+
+    for ( t = firstTri; t < endTri; t++ )
+    {
+        const GeoTriangle_t *tri    = &geoTris[t];
+        const orientation_t *orient = &geoGlob.modelOrientation[modelIndex];
+        vec3_t               normal;
+        vec3_t               vertexNormal;
+        vec3_t               rotated;
+        int                  v;
+
+        /* Light goes out of the front: the triangle's own normal, flipped to agree with
+           the surface's vertex normals if its winding disagrees */
+        Vec3Copy( tri->normal, normal );
+
+        Vec3Clear( vertexNormal );
+
+        for ( v = 0; v < 3; v++ )
+        {
+            TransformDir( orient, geoVertices[tri->indices[v]].normal, rotated );
+            Vec3Add( vertexNormal, rotated, vertexNormal );
+        }
+
+        if ( Vec3Dot( normal, vertexNormal ) < 0.0f )
+            Vec3Scale( normal, -1.0f, normal );
+
+        Emissive_AddTriangle( geoGlob.worldSpaceXyz[tri->indices[0]],
+                              geoGlob.worldSpaceXyz[tri->indices[1]],
+                              geoGlob.worldSpaceXyz[tri->indices[2]], normal );
+    }
+
+    Emissive_EndBrush();
+
+    Print( "emissive brush *%i: %i triangles, %i samples per lit point, radius %.0f\n",
+           modelIndex, endTri - firstTri, sampleCount, radius );
+}
+
 /* MapIO_AddBrushModel  0x00417fa0 */
 static void MapIO_AddBrushModel( const Entity_t *ent, const char *model )
 {
@@ -483,7 +573,12 @@ static void MapIO_AddBrushModel( const Entity_t *ent, const char *model )
         return;
     }
 
-    MapIO_AddModelSurfaces( ent, modelIndex );
+    {
+        int firstTri = geoTriCount;
+
+        MapIO_AddModelSurfaces( ent, modelIndex );
+        MapIO_AddEmissiveBrush( ent, modelIndex, firstTri, geoTriCount );
+    }
 }
 
 /* MapIO_AllocModelMemory  0x00417ff0 */

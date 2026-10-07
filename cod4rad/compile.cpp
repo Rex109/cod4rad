@@ -27,6 +27,7 @@
 #include "modelcollision.h"
 #include "gputrace.h"
 #include "gputransport.h"
+#include "emissive.h"
 
 
 #define RADIOSITY_JITTER_SCALE      ( 2.0f / 32767.0f )
@@ -386,8 +387,6 @@ void RunLightCompile( int threadCount )
     Geo_BuildTransport( threadCount );
     EndProgress();
 
-    GpuTransport_Shutdown();
-
     if ( options.relightSave )
         Lighting_SaveTransfers();
 
@@ -415,6 +414,9 @@ void RunLightCompile( int threadCount )
     EndProgress();
 
     LightGrid_Compile( threadCount );
+
+    /* The light grid uses the GPU too, so it is released last */
+    GpuTransport_Shutdown();
 }
 
 /* Compile_SeedSkyLight  0x00406ba0 */
@@ -968,6 +970,33 @@ static void Compile_AddPointLight( const vec3_t *axis, int threadIndex, int ligh
                               primaryVisibility, subSample, scaled, scaled, axis );
 }
 
+/* Compile_AddEmissiveLight: the light every emissive brush casts onto this sub-sample,
+   added as one light arriving from the brushes' combined direction */
+static void Compile_AddEmissiveLight( int threadIndex, const vec3_t pos, const vec3_t *axis,
+                                      float scale, float subAreaX2, LmapSubSample_t *subSample )
+{
+    vec3_t   color;
+    vec3_t   dir;
+    vec3_t   scaled;
+    float    weight;
+    unsigned seed;
+
+    /* The same point always takes the same samples */
+    seed = ( ( unsigned )( int )floor( pos[0] * 16.0f ) * 73856093u )
+         ^ ( ( unsigned )( int )floor( pos[1] * 16.0f ) * 19349663u )
+         ^ ( ( unsigned )( int )floor( pos[2] * 16.0f ) * 83492791u );
+
+    if ( !Emissive_Gather( pos, axis[2], seed, color, dir, &weight ) )
+        return;
+
+    scaled[0] = color[0] * scale;
+    scaled[1] = color[1] * scale;
+    scaled[2] = color[2] * scale;
+
+    Compile_AddIncidentLight( threadIndex, LIGHT_INFLUENCE_DIRECTIONAL, dir, weight,
+                              subAreaX2, subSample, scaled, scaled, axis );
+}
+
 /* Compile_BounceSample  0x00407c50 */
 static void Compile_BounceSample( LmapDef_t *toSample, int threadIndex )
 {
@@ -1170,7 +1199,7 @@ void Compile_SetGpuTrace( int threadIndex, const GpuHit_t *hits )
 
 /* Compile_ResolveGpuHit */
 static int Compile_ResolveGpuHit( const vec3_t pos, const GpuHit_t *gpuHit,
-                                  TransportHit_t *hits, int *hitCount )
+                                  qboolean pointFilter, TransportHit_t *hits, int *hitCount )
 {
     GeoTrace_t trace;
     int        flags = 0;
@@ -1197,9 +1226,15 @@ static int Compile_ResolveGpuHit( const vec3_t pos, const GpuHit_t *gpuHit,
 
     /* The start and end points are only needed to report a hit position, which
        radiosity traces never ask for */
-    return Compile_ResolveTransport( trace, pos, pos, NULL, flags,
-                                     options.traceFilterWidth == TRACE_FILTER_POINT,
+    return Compile_ResolveTransport( trace, pos, pos, NULL, flags, pointFilter,
                                      hits, hitCount, NULL, NULL );
+}
+
+/* Compile_ResolveGridHit: the same for a light grid sky trace, which always point filters */
+int Compile_ResolveGridHit( const vec3_t pos, const GpuHit_t *gpuHit,
+                            TransportHit_t *hits, int *hitCount )
+{
+    return Compile_ResolveGpuHit( pos, gpuHit, qtrue, hits, hitCount );
 }
 
 /* Compile_MergeBounces: adds all the bounce hits of one sub-sample to a sample in a
@@ -1349,6 +1384,7 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
         {
             if ( compileGpuHits[threadIndex] )
                 results[i] = Compile_ResolveGpuHit( pos, &compileGpuHits[threadIndex][i],
+                                                    options.traceFilterWidth == TRACE_FILTER_POINT,
                                                     compileTraceHits[threadIndex][i],
                                                     &hitCounts[i] );
             else
@@ -1449,6 +1485,9 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
     for ( slot = 2; slot < compileLightSlots; slot++ )
         Compile_AddPointLight( axis, threadIndex, lightType, slot, pos,
                                axis0, axis1, scale, subAreaX2, subSample );
+
+    if ( Emissive_Active() )
+        Compile_AddEmissiveLight( threadIndex, pos, axis, scale, subAreaX2, subSample );
 
     if ( prof )
         prof[3] += GpuTrace_Seconds() - prof0;

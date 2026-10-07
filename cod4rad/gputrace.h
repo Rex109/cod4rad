@@ -89,6 +89,20 @@ int  GpuTrace_SetDirections( const float *dirX, const float *dirY, const float *
    failed (e.g. device removed). */
 int  GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits );
 
+/* Fixed directions for GpuTrace_TraceFixed: count unit vectors, three floats each.  Every
+   job (only its pos is used) then traces all of them, and the hits come back
+   job-major, like GpuTrace_TraceJobs.  Used for the light grid's sky traces. */
+int  GpuTrace_SetFixedDirections( const float *xyz, int count );
+int  GpuTrace_TraceFixed( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits );
+
+/* Light grid quantization.  samples is pointCount colours of 168 bytes each, and the first
+   candidateCount of them are the candidates.  colorsIndex has each point's current
+   candidate on the way in and its nearest one on the way out (the same search and
+   tie-breaking as the CPU's LightGrid_MapColor).  progress, if given, is called after
+   each chunk.  Returns 0 if the GPU can't do it, leaving colorsIndex unchanged. */
+int  GpuTrace_NearestColors( const unsigned char *samples, int pointCount, int candidateCount,
+                             unsigned short *colorsIndex, void ( *progress )( int done, int total ) );
+
 /* Monotonic clock in seconds, for the -gpu timing report */
 double GpuTrace_Seconds( void );
 

@@ -136,6 +136,8 @@ qboolean Compile_TraceSubSample( int threadIndex, int lightType, const vec3_t po
    Compile_SetGpuTrace then makes the next Compile_TraceSubSample on that thread use
    the traced hits (pass NULL to go back to tracing on the CPU). */
 bool     Compile_GpuUploadDirections( void );
+int      Compile_ResolveGridHit( const vec3_t pos, const GpuHit_t *gpuHit,
+                                 TransportHit_t *hits, int *hitCount );
 unsigned Compile_GpuNextSeed( void );
 void     Compile_PrintGpuProfile( int threads );
 void     Compile_SetGpuTrace( int threadIndex, const GpuHit_t *hits );

@@ -27,8 +27,26 @@ On one test map (about 5.4 billion rays, RTX 5080, 16 threads) the light transpo
 
 - ⚡ Float math on the GPU instead of the original x87 code, so results can differ slightly from the CPU path.
 - 🔁 If there's no usable GPU, it says so and falls back to the CPU.
-- 🧱 Still on the CPU: sun and point light shadows, the light grid and model lighting.
+- 🧊 The light grid's sky traces (the bulk of its work) run on the GPU too, and so does the colour search of its quantization (the "Improving quantization" step used by `-Extra`).
+- 🧱 Still on the CPU: sun, point light and emissive brush shadows, and the rest of the light grid and model lighting.
 - `-Threads N` accepts 1 to 16. Without it, the CPU path uses up to 4 threads like the original, and `-gpu` uses every core (up to 16), since the CPU side is what keeps the GPU fed.
+
+## 💡 Emissive brushes
+
+Make a brush part of a brush entity (for example `script_brushmodel`) and give it these keys in Radiant. When cod4rad runs, the brush's visible faces give off light, with no material changes.
+
+| Key | Meaning |
+| --- | --- |
+| `_emit_color` | `r g b`, scaled so the brightest component is 1 (same as a light's `_color`) |
+| `_emit_intensity` | Brightness, default `1`. It is what a very large face gives a surface right next to it |
+| `_emit_radius` | How far the light reaches, default `512` (it fades smoothly to nothing there) |
+| `_emit_samples` | Points sampled on the brush for every lit point, default `16`, up to `256`. More is smoother and slower |
+
+- The faces are real **area lights** for everything around them: light from each face falls off with distance squared and with the angle, so big panels give soft shadows.
+- Light goes **outwards only**, along each face's normal. Nothing is lit behind a face, the brush does not light its own surfaces, and the faces of a convex brush don't light each other.
+- Surfaces and models (through the light grid) are both lit. The light is baked, so it does not move with the entity at runtime.
+- Surfaces very close to a face can look slightly noisy with few samples; raise `_emit_samples` on that brush.
+- cod4rad prints `emissive brush *N: ...` for each one it finds, so you can check it was picked up.
 
 ## Build
 

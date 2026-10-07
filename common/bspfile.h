@@ -69,9 +69,15 @@ typedef enum
 #define MAX_MAP_MATERIALS            1224        /* 0x15840 / 0x48 */
 #define MAX_MAP_LIGHTMAPS            31          /* 0x5d00000 / 0x300000 */
 #define LIGHTMAP_BYTES               0x300000
+#ifdef _WIN64
+/* Sized for MAX_MAP_LIGHTGRID_POINTS (0x4000000) points; a row needs at most 3 bytes per point */
+#define MAX_MAP_LIGHTGRIDENTRIES     0x4000000
+#define MAX_MAP_LIGHTGRIDROWBYTES    0xC000000
+#else
 #define MAX_MAP_LIGHTGRIDENTRIES     0x100000    /* 0x400000 */
-#define MAX_MAP_LIGHTGRIDCOLORS      0xffff      /* 0xa7ff58 / 0xa8 */
 #define MAX_MAP_LIGHTGRIDROWBYTES    0x40000
+#endif
+#define MAX_MAP_LIGHTGRIDCOLORS      0xffff      /* 0xa7ff58 / 0xa8 */
 #define MAX_MAP_PLANES               0x10000
 #define MAX_MAP_BRUSHSIDES           0xa0000
 #define MAX_MAP_BRUSHEDGES           0x200000

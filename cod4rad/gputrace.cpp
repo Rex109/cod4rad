@@ -39,9 +39,12 @@ StructuredBuffer<Mtl>   gMtls    : register( t4 );
 StructuredBuffer<uint>  gMasks   : register( t5 );
 StructuredBuffer<Job>   gJobs    : register( t6 );
 StructuredBuffer<float4> gDirs   : register( t7 );     // x, y, jitter radius
+StructuredBuffer<float4> gFixedDirs : register( t8 );  // x, y, z: unit directions, used as they are
 RWStructuredBuffer<Hit> gHits    : register( u0 );
 
-cbuffer Params : register( b0 ) { uint gRayCount; uint gTraceCount; uint gPad1; uint gPad2; };
+// gMode 0: jittered radiosity rays about each job's surface basis.
+// gMode 1: the fixed directions from the job's position (light grid sky traces).
+cbuffer Params : register( b0 ) { uint gRayCount; uint gTraceCount; uint gMode; uint gPad2; };
 
 uint Pcg( uint v )
 {
@@ -117,6 +120,14 @@ void main( uint3 id : SV_DispatchThreadID )
     uint jobIndex = id.x / gTraceCount;
     uint dirIndex = id.x - jobIndex * gTraceCount;
     Job job = gJobs[jobIndex];
+    float3 dir = float3( 0.0, 0.0, 1.0 );
+
+    if ( gMode == 1 )
+    {
+        dir = gFixedDirs[dirIndex].xyz;
+    }
+    else
+    {
     float4 sampleDir = gDirs[dirIndex];
 
     uint rng = Pcg( job.seed * 2654435769u + dirIndex * 2246822519u + 1750411684u );
@@ -152,7 +163,9 @@ void main( uint3 id : SV_DispatchThreadID )
         lz = sqrt( 1.0 - lenSq );
     }
 
-    float3 dir = job.axis0 * lx + job.axis1 * ly + job.axis2 * lz;
+    dir = job.axis0 * lx + job.axis1 * ly + job.axis2 * lz;
+    }
+
     float3 start = job.pos + dir * 0.125;
     float3 end = start + dir * 262144.0;
     float3 delta = end - start;
@@ -261,6 +274,9 @@ static struct
     ID3D11Buffer              *dirBuffer;
     ID3D11ShaderResourceView  *dirView;
     int                        directionCount;
+    ID3D11Buffer              *fixedDirBuffer;
+    ID3D11ShaderResourceView  *fixedDirView;
+    int                        fixedDirectionCount;
     ID3D11Buffer              *hitBuffer;
     ID3D11UnorderedAccessView *hitView;
     ID3D11Buffer              *hitStaging;
@@ -485,6 +501,8 @@ void GpuTrace_Shutdown( void )
     SafeRelease( gpu.hitStaging );
     SafeRelease( gpu.hitView );
     SafeRelease( gpu.hitBuffer );
+    SafeRelease( gpu.fixedDirView );
+    SafeRelease( gpu.fixedDirBuffer );
     SafeRelease( gpu.dirView );
     SafeRelease( gpu.dirBuffer );
     SafeRelease( gpu.jobView );
@@ -546,16 +564,53 @@ int GpuTrace_SetDirections( const float *dirX, const float *dirY, const float *j
     return 1;
 }
 
-static int TraceSlice( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
+int GpuTrace_SetFixedDirections( const float *xyz, int count )
+{
+    float *packed;
+    int    i;
+    HRESULT hr;
+
+    if ( count < 1 || count > 4096 )
+        return 0;
+
+    packed = new float[count * 4];
+
+    for ( i = 0; i < count; i++ )
+    {
+        packed[i * 4 + 0] = xyz[i * 3 + 0];
+        packed[i * 4 + 1] = xyz[i * 3 + 1];
+        packed[i * 4 + 2] = xyz[i * 3 + 2];
+        packed[i * 4 + 3] = 0.0f;
+    }
+
+    SafeRelease( gpu.fixedDirView );
+    SafeRelease( gpu.fixedDirBuffer );
+
+    hr = CreateStructured( packed, 16, count, &gpu.fixedDirBuffer, &gpu.fixedDirView );
+
+    delete[] packed;
+
+    if ( FAILED( hr ) )
+        return 0;
+
+    gpu.fixedDirectionCount = count;
+
+    return 1;
+}
+
+/* mode 0: jittered radiosity directions, mode 1: the fixed directions.  traceCount is how
+   many rays each job makes. */
+static int TraceSlice( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits,
+                       unsigned mode, int traceCount )
 {
     D3D11_MAPPED_SUBRESOURCE mapped;
-    ID3D11ShaderResourceView *views[8];
-    ID3D11ShaderResourceView *noViews[8] = { 0 };
+    ID3D11ShaderResourceView *views[9];
+    ID3D11ShaderResourceView *noViews[9] = { 0 };
     ID3D11UnorderedAccessView *uav = gpu.hitView;
     ID3D11UnorderedAccessView *noUav = NULL;
     ID3D11Buffer *cb = gpu.params;
     D3D11_BOX box;
-    int rayCount = jobCount * gpu.directionCount;
+    int rayCount = jobCount * traceCount;
     int i;
 
     if ( FAILED( gpu.context->Map( gpu.jobBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
@@ -569,8 +624,9 @@ static int TraceSlice( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
         unsigned *p = ( unsigned * )mapped.pData;
 
         p[0] = ( unsigned )rayCount;
-        p[1] = ( unsigned )gpu.directionCount;
-        p[2] = p[3] = 0;
+        p[1] = ( unsigned )traceCount;
+        p[2] = mode;
+        p[3] = 0;
         gpu.context->Unmap( gpu.params, 0 );
     }
 
@@ -578,15 +634,16 @@ static int TraceSlice( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
         views[i] = gpu.sceneViews[i];
     views[6] = gpu.jobView;
     views[7] = gpu.dirView;
+    views[8] = gpu.fixedDirView;
 
     gpu.context->CSSetShader( gpu.shader, NULL, 0 );
-    gpu.context->CSSetShaderResources( 0, 8, views );
+    gpu.context->CSSetShaderResources( 0, 9, views );
     gpu.context->CSSetUnorderedAccessViews( 0, 1, &uav, NULL );
     gpu.context->CSSetConstantBuffers( 0, 1, &cb );
 
     gpu.context->Dispatch( ( UINT )( ( rayCount + GPU_GROUP_SIZE - 1 ) / GPU_GROUP_SIZE ), 1, 1 );
 
-    gpu.context->CSSetShaderResources( 0, 8, noViews );
+    gpu.context->CSSetShaderResources( 0, 9, noViews );
     gpu.context->CSSetUnorderedAccessViews( 0, 1, &noUav, NULL );
 
     box.left  = 0; box.right  = ( UINT )rayCount * sizeof( GpuHit_t );
@@ -632,18 +689,25 @@ void GpuTrace_Stats( double *rays, double *busySeconds, double *waitSeconds )
     *waitSeconds = gpu.statWait;
 }
 
-int GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
+static int TraceMany( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits,
+                      unsigned mode, int traceCount )
 {
     int    ok = 1;
     int    perSlice;
     double queued = GpuSeconds();
     double started;
-    double rays = ( double )jobCount * gpu.directionCount;
+    double rays = ( double )jobCount * traceCount;
 
-    if ( !gpu.directionCount )
+    if ( traceCount < 1 )
         return 0;
 
-    perSlice = GPU_MAX_RAYS_PER_DISPATCH / gpu.directionCount;
+    perSlice = GPU_MAX_RAYS_PER_DISPATCH / traceCount;
+
+    if ( perSlice < 1 )
+        return 0;
+
+    if ( perSlice > GPU_MAX_JOBS_PER_DISPATCH )
+        perSlice = GPU_MAX_JOBS_PER_DISPATCH;
 
     EnterCriticalSection( &gpu.lock );
 
@@ -654,19 +718,325 @@ int GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
     {
         int slice = jobCount < perSlice ? jobCount : perSlice;
 
-        if ( !TraceSlice( jobs, slice, hits ) )
+        if ( !TraceSlice( jobs, slice, hits, mode, traceCount ) )
         {
             ok = 0;
             break;
         }
 
         jobs     += slice;
-        hits     += slice * gpu.directionCount;
+        hits     += slice * traceCount;
         jobCount -= slice;
     }
 
     gpu.statRays += rays;
     gpu.statBusy += GpuSeconds() - started;
+
+    LeaveCriticalSection( &gpu.lock );
+
+    return ok;
+}
+
+int GpuTrace_TraceJobs( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
+{
+    if ( !gpu.directionCount )
+        return 0;
+
+    return TraceMany( jobs, jobCount, hits, 0, gpu.directionCount );
+}
+
+int GpuTrace_TraceFixed( const GpuJob_t *jobs, int jobCount, GpuHit_t *hits )
+{
+    if ( !gpu.fixedDirectionCount )
+        return 0;
+
+    return TraceMany( jobs, jobCount, hits, 1, gpu.fixedDirectionCount );
+}
+
+
+/* ---- Nearest colour search (light grid quantization) -----------------------
+   For every point, finds the candidate colour closest to its own, where a colour is
+   168 bytes and the distance is the sum of squared byte differences.  This is the
+   same search, with the same tie-breaking, as LightGrid_MapColor on the CPU:
+   the point's current candidate wins ties, then the lowest index. */
+static const char gpuNearestSource[] =
+R"HLSL(
+StructuredBuffer<uint> gCands  : register( t0 );    // candidateCount * 42 words
+StructuredBuffer<uint> gPoints : register( t1 );    // count * 42 words
+StructuredBuffer<uint> gIndex  : register( t2 );    // each point's current candidate
+RWStructuredBuffer<uint> gOut  : register( u0 );
+
+cbuffer Params : register( b0 ) { uint gCount; uint gK; uint gPad0; uint gPad1; };
+
+#define WORDS 42
+#define TILE  64
+
+groupshared uint tile[TILE * WORDS];
+
+uint SqDiff4( uint a, uint b )
+{
+    int d0 = (int)( a & 255u )         - (int)( b & 255u );
+    int d1 = (int)( ( a >> 8 ) & 255u )  - (int)( ( b >> 8 ) & 255u );
+    int d2 = (int)( ( a >> 16 ) & 255u ) - (int)( ( b >> 16 ) & 255u );
+    int d3 = (int)( a >> 24 )          - (int)( b >> 24 );
+    return (uint)( d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3 );
+}
+
+[numthreads( TILE, 1, 1 )]
+void main( uint3 gid : SV_GroupID, uint gi : SV_GroupIndex )
+{
+    uint p = gid.x * TILE + gi;
+    bool active = p < gCount;
+
+    uint pt[WORDS];
+    uint cur = 0;
+
+    [unroll] for ( uint w = 0; w < WORDS; w++ )
+        pt[w] = 0;
+
+    if ( active )
+    {
+        [unroll] for ( uint w2 = 0; w2 < WORDS; w2++ )
+            pt[w2] = gPoints[p * WORDS + w2];
+
+        cur = gIndex[p];
+    }
+
+    uint best = 0xffffffffu;
+    uint bestIdx = cur;
+
+    if ( active )
+    {
+        uint d = 0;
+
+        [unroll] for ( uint w3 = 0; w3 < WORDS; w3++ )
+            d += SqDiff4( pt[w3], gCands[cur * WORDS + w3] );
+
+        best = d;
+    }
+
+    bool done = !active || best == 0;
+
+    [loop] for ( uint base = 0; base < gK; base += TILE )
+    {
+        GroupMemoryBarrierWithGroupSync();
+
+        for ( uint e = gi; e < TILE * WORDS; e += TILE )
+            tile[e] = ( base + e / WORDS ) < gK ? gCands[base * WORDS + e] : 0u;
+
+        GroupMemoryBarrierWithGroupSync();
+
+        if ( !done )
+        {
+            uint n = min( (uint)TILE, gK - base );
+
+            [loop] for ( uint c = 0; c < n; c++ )
+            {
+                uint d = 0;
+                bool closer = true;
+
+                [loop] for ( uint i = 0; i < WORDS; i++ )
+                {
+                    d += SqDiff4( pt[i], tile[c * WORDS + i] );
+
+                    if ( d >= best )
+                    {
+                        closer = false;
+                        break;
+                    }
+                }
+
+                if ( closer )
+                {
+                    best = d;
+                    bestIdx = base + c;
+
+                    if ( d == 0 )
+                    {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if ( active )
+        gOut[p] = bestIdx;
+}
+)HLSL";
+
+int GpuTrace_NearestColors( const unsigned char *samples, int pointCount, int candidateCount,
+                            unsigned short *colorsIndex, void ( *progress )( int done, int total ) )
+{
+    const int                   wordsPerSample = 42;
+    const int                   chunkMax = 1 << 17;     /* small enough that one dispatch is short */
+    ID3DBlob                   *code = NULL;
+    ID3DBlob                   *messages = NULL;
+    ID3D11ComputeShader        *shader = NULL;
+    ID3D11Buffer               *candBuffer = NULL;
+    ID3D11ShaderResourceView   *candView = NULL;
+    ID3D11Buffer               *pointBuffer = NULL;
+    ID3D11ShaderResourceView   *pointView = NULL;
+    ID3D11Buffer               *indexBuffer = NULL;
+    ID3D11ShaderResourceView   *indexView = NULL;
+    ID3D11Buffer               *outBuffer = NULL;
+    ID3D11UnorderedAccessView  *outView = NULL;
+    ID3D11Buffer               *staging = NULL;
+    ID3D11Buffer               *paramBuffer = NULL;
+    D3D11_BUFFER_DESC           desc;
+    D3D11_MAPPED_SUBRESOURCE    mapped;
+    int                         ok = 0;
+    int                         done;
+
+    if ( !gpu.device || pointCount < 1 || candidateCount < 1 )
+        return 0;
+
+    EnterCriticalSection( &gpu.lock );
+
+    if ( FAILED( D3DCompile( gpuNearestSource, sizeof( gpuNearestSource ) - 1, "gpunearest",
+                             NULL, NULL, "main", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                             &code, &messages ) ) )
+        goto cleanup;
+
+    if ( FAILED( gpu.device->CreateComputeShader( code->GetBufferPointer(), code->GetBufferSize(),
+                                                  NULL, &shader ) ) )
+        goto cleanup;
+
+    /* The candidates, as they are in memory */
+    if ( FAILED( CreateStructured( samples, 4, candidateCount * wordsPerSample,
+                                   &candBuffer, &candView ) ) )
+        goto cleanup;
+
+    /* Points go in a chunk at a time */
+    memset( &desc, 0, sizeof( desc ) );
+    desc.ByteWidth           = chunkMax * wordsPerSample * 4;
+    desc.Usage               = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags           = D3D11_BIND_SHADER_RESOURCE;
+    desc.CPUAccessFlags      = D3D11_CPU_ACCESS_WRITE;
+    desc.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = 4;
+
+    if ( FAILED( gpu.device->CreateBuffer( &desc, NULL, &pointBuffer ) )
+         || FAILED( gpu.device->CreateShaderResourceView( pointBuffer, NULL, &pointView ) ) )
+        goto cleanup;
+
+    desc.ByteWidth = chunkMax * 4;
+
+    if ( FAILED( gpu.device->CreateBuffer( &desc, NULL, &indexBuffer ) )
+         || FAILED( gpu.device->CreateShaderResourceView( indexBuffer, NULL, &indexView ) ) )
+        goto cleanup;
+
+    memset( &desc, 0, sizeof( desc ) );
+    desc.ByteWidth           = chunkMax * 4;
+    desc.Usage               = D3D11_USAGE_DEFAULT;
+    desc.BindFlags           = D3D11_BIND_UNORDERED_ACCESS;
+    desc.MiscFlags           = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    desc.StructureByteStride = 4;
+
+    if ( FAILED( gpu.device->CreateBuffer( &desc, NULL, &outBuffer ) )
+         || FAILED( gpu.device->CreateUnorderedAccessView( outBuffer, NULL, &outView ) ) )
+        goto cleanup;
+
+    memset( &desc, 0, sizeof( desc ) );
+    desc.ByteWidth      = chunkMax * 4;
+    desc.Usage          = D3D11_USAGE_STAGING;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    if ( FAILED( gpu.device->CreateBuffer( &desc, NULL, &staging ) ) )
+        goto cleanup;
+
+    memset( &desc, 0, sizeof( desc ) );
+    desc.ByteWidth      = 16;
+    desc.Usage          = D3D11_USAGE_DYNAMIC;
+    desc.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    if ( FAILED( gpu.device->CreateBuffer( &desc, NULL, &paramBuffer ) ) )
+        goto cleanup;
+
+    for ( done = 0; done < pointCount; )
+    {
+        int                        count = pointCount - done < chunkMax ? pointCount - done : chunkMax;
+        ID3D11ShaderResourceView  *views[3] = { candView, pointView, indexView };
+        ID3D11ShaderResourceView  *noViews[3] = { NULL, NULL, NULL };
+        ID3D11UnorderedAccessView *uav = outView;
+        ID3D11UnorderedAccessView *noUav = NULL;
+        ID3D11Buffer              *cb = paramBuffer;
+        D3D11_BOX                  box;
+        int                        i;
+
+        if ( FAILED( gpu.context->Map( pointBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
+            goto cleanup;
+
+        memcpy( mapped.pData, samples + ( size_t )done * wordsPerSample * 4,
+                ( size_t )count * wordsPerSample * 4 );
+        gpu.context->Unmap( pointBuffer, 0 );
+
+        if ( FAILED( gpu.context->Map( indexBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
+            goto cleanup;
+
+        for ( i = 0; i < count; i++ )
+            ( ( unsigned * )mapped.pData )[i] = colorsIndex[done + i];
+
+        gpu.context->Unmap( indexBuffer, 0 );
+
+        if ( SUCCEEDED( gpu.context->Map( paramBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped ) ) )
+        {
+            unsigned *p = ( unsigned * )mapped.pData;
+
+            p[0] = ( unsigned )count;
+            p[1] = ( unsigned )candidateCount;
+            p[2] = p[3] = 0;
+            gpu.context->Unmap( paramBuffer, 0 );
+        }
+
+        gpu.context->CSSetShader( shader, NULL, 0 );
+        gpu.context->CSSetShaderResources( 0, 3, views );
+        gpu.context->CSSetUnorderedAccessViews( 0, 1, &uav, NULL );
+        gpu.context->CSSetConstantBuffers( 0, 1, &cb );
+
+        gpu.context->Dispatch( ( UINT )( ( count + 63 ) / 64 ), 1, 1 );
+
+        gpu.context->CSSetShaderResources( 0, 3, noViews );
+        gpu.context->CSSetUnorderedAccessViews( 0, 1, &noUav, NULL );
+
+        box.left  = 0; box.right  = ( UINT )count * 4;
+        box.top   = 0; box.bottom = 1;
+        box.front = 0; box.back   = 1;
+        gpu.context->CopySubresourceRegion( staging, 0, 0, 0, 0, outBuffer, 0, &box );
+
+        /* Map blocks until this chunk is finished */
+        if ( FAILED( gpu.context->Map( staging, 0, D3D11_MAP_READ, 0, &mapped ) ) )
+            goto cleanup;
+
+        for ( i = 0; i < count; i++ )
+            colorsIndex[done + i] = ( unsigned short )( ( ( const unsigned * )mapped.pData )[i] );
+
+        gpu.context->Unmap( staging, 0 );
+
+        done += count;
+
+        if ( progress )
+            progress( done, pointCount );
+    }
+
+    ok = 1;
+
+cleanup:
+    SafeRelease( paramBuffer );
+    SafeRelease( staging );
+    SafeRelease( outView );
+    SafeRelease( outBuffer );
+    SafeRelease( indexView );
+    SafeRelease( indexBuffer );
+    SafeRelease( pointView );
+    SafeRelease( pointBuffer );
+    SafeRelease( candView );
+    SafeRelease( candBuffer );
+    SafeRelease( shader );
+    SafeRelease( messages );
+    SafeRelease( code );
 
     LeaveCriticalSection( &gpu.lock );
 

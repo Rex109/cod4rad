@@ -10,6 +10,10 @@
 #include "pointlights.h"
 #include "bspfile.h"
 #include "threads.h"
+#include "emissive.h"
+#include "gputrace.h"
+#include "gputransport.h"
+#include <vector>
 
 #include "assertive.h"
 #include "com_math.h"
@@ -1136,7 +1140,8 @@ static void LightGrid_QuantizeColors( const LightGridColors_t *colors,
 }
 
 /* LightGrid_TracePoint  0x004116b0 */
-static void LightGrid_TracePoint( int pointIndex, int threadIndex )
+/* skyHits, when given, are the sky traces already done on the GPU, one per sky direction */
+static void LightGrid_TracePointWith( int pointIndex, int threadIndex, const GpuHit_t *skyHits )
 {
     LightGridColors_t colors;
     TransportHit_t    hits[TRANSPORT_MAX_HITS];
@@ -1159,9 +1164,11 @@ static void LightGrid_TracePoint( int pointIndex, int threadIndex )
 
     for ( i = 0; i < options.skyTraceCount; i++ )
     {
-        int result = Compile_TraceTransport( origin, lightGridSkyTraceDirs[i],
-                                             LIGHTGRID_TRACE_DISTANCE, qtrue,
-                                             hits, &hitCount, NULL, NULL );
+        int result = skyHits
+            ? Compile_ResolveGridHit( origin, &skyHits[i], hits, &hitCount )
+            : Compile_TraceTransport( origin, lightGridSkyTraceDirs[i],
+                                      LIGHTGRID_TRACE_DISTANCE, qtrue,
+                                      hits, &hitCount, NULL, NULL );
 
         if ( result < TRANSPORT_SKY )
             continue;
@@ -1222,9 +1229,65 @@ static void LightGrid_TracePoint( int pointIndex, int threadIndex )
             LightGrid_AddAmbientColor( &colors, color );
     }
 
+    /* Emissive brushes light models like any other light */
+    if ( Emissive_Active() )
+    {
+        vec3_t   emissiveColor;
+        vec3_t   emissiveDir;
+        unsigned seed;
+
+        seed = ( ( unsigned )( int )floor( origin[0] * 16.0f ) * 73856093u )
+             ^ ( ( unsigned )( int )floor( origin[1] * 16.0f ) * 19349663u )
+             ^ ( ( unsigned )( int )floor( origin[2] * 16.0f ) * 83492791u );
+
+        if ( Emissive_Gather( origin, NULL, seed, emissiveColor, emissiveDir, NULL ) )
+            LightGrid_AddDirectionalColor( &colors, emissiveDir, emissiveColor );
+    }
+
     LightGrid_QuantizeColors( &colors, &lightGridGlob.samples[pointIndex] );
 
     LightGrid_ComputeCornerMask( threadIndex, origin, &point->cornerMask );
+}
+
+static void LightGrid_TracePoint( int pointIndex, int threadIndex )
+{
+    LightGrid_TracePointWith( pointIndex, threadIndex, NULL );
+}
+
+/* With -gpu: a chunk of probes has its sky traces done in one go on the GPU */
+#define LIGHTGRID_GPU_CHUNK     128
+
+static void LightGrid_TraceChunk( int chunkIndex, int threadIndex )
+{
+    const int first    = chunkIndex * LIGHTGRID_GPU_CHUNK;
+    int       last     = first + LIGHTGRID_GPU_CHUNK;
+    int       rayCount = options.skyTraceCount;
+    int       count;
+    int       i;
+
+    if ( last > lightGridGlob.pointCount )
+        last = lightGridGlob.pointCount;
+
+    count = last - first;
+
+    std::vector<GpuJob_t> jobs( count );
+    std::vector<GpuHit_t> hits( ( size_t )count * rayCount );
+
+    for ( i = 0; i < count; i++ )
+    {
+        vec3_t origin;
+
+        LightGrid_PointToOrigin( origin, &lightGridGlob.points[first + i] );
+
+        memset( &jobs[i], 0, sizeof( GpuJob_t ) );
+        Vec3Copy( origin, jobs[i].pos );
+    }
+
+    if ( !GpuTrace_TraceFixed( &jobs[0], count, &hits[0] ) )
+        Error( "The GPU stopped responding while tracing the light grid.  Run again without -gpu.\n" );
+
+    for ( i = 0; i < count; i++ )
+        LightGrid_TracePointWith( first + i, threadIndex, &hits[( size_t )i * rayCount] );
 }
 
 /* LightGrid_AddSkySample  0x00411970 */
@@ -1631,6 +1694,35 @@ static void LightGrid_SwapClusters( int a, int b )
     }
 }
 
+static void LightGrid_RemapProgress( int done, int total )
+{
+    SetProgress( done, total );
+}
+
+/* With -gpu: the same nearest colour search as LightGrid_RemapPoint, for every point at once.
+   Returns false (leaving the points alone) if the GPU can't do it, so the CPU does it. */
+static bool LightGrid_RemapOnGpu( void )
+{
+    if ( !GpuTransport_Enabled() )
+        return false;
+
+    std::vector<unsigned short> indexes( lightGridGlob.pointCount );
+    int                         i;
+
+    for ( i = 0; i < lightGridGlob.pointCount; i++ )
+        indexes[i] = lightGridGlob.points[i].colorsIndex;
+
+    if ( !GpuTrace_NearestColors( ( const unsigned char * )lightGridGlob.samples,
+                                  lightGridGlob.pointCount, lightGridClusterCount,
+                                  &indexes[0], LightGrid_RemapProgress ) )
+        return false;
+
+    for ( i = 0; i < lightGridGlob.pointCount; i++ )
+        lightGridGlob.points[i].colorsIndex = indexes[i];
+
+    return true;
+}
+
 /* LightGrid_ImproveQuantization  0x00412760 */
 static void LightGrid_ImproveQuantization( int threads )
 {
@@ -1660,7 +1752,10 @@ static void LightGrid_ImproveQuantization( int threads )
     memset( counts, 0, lightGridClusterCount * sizeof( int ) );
 
     StartProgress( "Improving quantization..." );
-    RunThreadsOn( lightGridGlob.pointCount, LightGrid_RemapPoint, threads );
+
+    if ( !LightGrid_RemapOnGpu() )
+        RunThreadsOn( lightGridGlob.pointCount, LightGrid_RemapPoint, threads );
+
     EndProgress();
 
     for ( i = 0; i < lightGridGlob.pointCount; i++ )
@@ -2162,7 +2257,19 @@ void LightGrid_Compile( int threads )
     LightGrid_BuildLightRegionStarts();
 
     StartProgress( "Calculating light grid..." );
-    RunThreadsOn( lightGridGlob.pointCount, LightGrid_TracePoint, threads );
+
+    if ( GpuTransport_Enabled()
+         && GpuTrace_SetFixedDirections( ( const float * )lightGridSkyTraceDirs,
+                                         options.skyTraceCount ) )
+    {
+        RunThreadsOn( ( lightGridGlob.pointCount + LIGHTGRID_GPU_CHUNK - 1 ) / LIGHTGRID_GPU_CHUNK,
+                      LightGrid_TraceChunk, threads );
+    }
+    else
+    {
+        RunThreadsOn( lightGridGlob.pointCount, LightGrid_TracePoint, threads );
+    }
+
     EndProgress();
 
     LightGrid_AddSkySample();

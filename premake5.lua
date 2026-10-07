@@ -32,6 +32,7 @@ project "cod4rad"
         "src/gfx_d3d/**.cpp", "src/gfx_d3d/**.h",
         "src/xanim/**.cpp", "src/xanim/**.h",
         "src/zlib/**.c", "src/zlib/**.h",
+        "assets/cod4rad.rc",
     }
 
     includedirs {
@@ -60,6 +61,7 @@ project "cod4rad"
         ["src/gfx_d3d/*"]    = { "src/gfx_d3d/**" },
         ["src/xanim/*"]      = { "src/xanim/**" },
         ["src/zlib/*"]       = { "src/zlib/**" },
+        ["assets/*"]         = { "assets/**" },
     }
 
     defines { "WIN32", "_WINDOWS", "_CRT_SECURE_NO_WARNINGS" }

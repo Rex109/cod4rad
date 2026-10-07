@@ -7,7 +7,7 @@
 #include "com_vector.h"
 
 
-#define POINTLIGHT_MAX  2048
+#define POINTLIGHT_MAX  65536
 
 #define POINTLIGHT_COINCIDENT_DIST  0.001f
 
