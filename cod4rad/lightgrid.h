@@ -111,6 +111,12 @@ void LightGrid_AddStaticModelOrigin( const vec3_t origin );     /* 0x0040fc90 */
 
 qboolean LightGrid_HasPointAtOrigin( const vec3_t origin );     /* 0x00410280 */
 
+/* Light grid points farther than this from any geometry, light or static model are dropped.
+   It is 0 (off) unless -GridMaxDistance is given, which uses this distance if it has no value. */
+#define LIGHTGRID_DEFAULT_MAX_DISTANCE  2048.0f
+
+extern float lightGridMaxDistance;
+
 void LightGrid_Compile( int threads );                          /* 0x00413630 */
 
 #endif

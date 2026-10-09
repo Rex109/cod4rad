@@ -585,6 +585,173 @@ static qboolean LightGrid_PointIsEnclosed( const vec3_t origin )
     return qtrue;
 }
 
+/* ---- Distance filter (-GridMaxDistance) --------------------------------------
+   A probe farther than lightGridMaxDistance from every piece of geometry, light and
+   static model is dropped.  This is done with a coarse grid of cells that are marked
+   where something is and then grown by the distance, so it errs on the side of keeping
+   a probe and a lookup costs next to nothing. */
+
+float lightGridMaxDistance = 0.0f;      /* off unless -GridMaxDistance is given */
+
+static std::vector<unsigned char> lightGridNearMask;        /* empty when the filter is off */
+static float                      lightGridNearMin[3];
+static float                      lightGridNearCell;
+static int                        lightGridNearDim[3];
+static int                        lightGridDistanceRemoved;
+
+static int LightGrid_NearCell( int axis, float value )
+{
+    int cell = ( int )floor( ( value - lightGridNearMin[axis] ) / lightGridNearCell );
+
+    if ( cell < 0 )
+        cell = 0;
+
+    if ( cell >= lightGridNearDim[axis] )
+        cell = lightGridNearDim[axis] - 1;
+
+    return cell;
+}
+
+static void LightGrid_MarkNearBox( const float *mins, const float *maxs )
+{
+    int lo[3];
+    int hi[3];
+    int x, y, z;
+    int axis;
+
+    for ( axis = 0; axis < 3; axis++ )
+    {
+        lo[axis] = LightGrid_NearCell( axis, mins[axis] );
+        hi[axis] = LightGrid_NearCell( axis, maxs[axis] );
+    }
+
+    for ( z = lo[2]; z <= hi[2]; z++ )
+        for ( y = lo[1]; y <= hi[1]; y++ )
+            for ( x = lo[0]; x <= hi[0]; x++ )
+                lightGridNearMask[( size_t )( z * lightGridNearDim[1] + y ) * lightGridNearDim[0] + x] = 1;
+}
+
+/* Grows every marked cell by radius cells along one axis */
+static void LightGrid_DilateNearMask( int axis, int radius )
+{
+    std::vector<unsigned char> grown( lightGridNearMask.size() );
+    std::vector<int>           prefix( lightGridNearDim[axis] + 1 );
+    const int                  stride[3] = { 1, lightGridNearDim[0],
+                                             lightGridNearDim[0] * lightGridNearDim[1] };
+    const int                  n      = lightGridNearDim[axis];
+    const int                  other0 = ( axis + 1 ) % 3;
+    const int                  other1 = ( axis + 2 ) % 3;
+    int                        a, b, i;
+
+    for ( a = 0; a < lightGridNearDim[other0]; a++ )
+    {
+        for ( b = 0; b < lightGridNearDim[other1]; b++ )
+        {
+            const size_t base = ( size_t )a * stride[other0] + ( size_t )b * stride[other1];
+
+            prefix[0] = 0;
+
+            for ( i = 0; i < n; i++ )
+                prefix[i + 1] = prefix[i] + ( lightGridNearMask[base + ( size_t )i * stride[axis]] ? 1 : 0 );
+
+            for ( i = 0; i < n; i++ )
+            {
+                int lo = i - radius < 0 ? 0 : i - radius;
+                int hi = i + radius > n - 1 ? n - 1 : i + radius;
+
+                grown[base + ( size_t )i * stride[axis]] = prefix[hi + 1] - prefix[lo] > 0 ? 1 : 0;
+            }
+        }
+    }
+
+    lightGridNearMask.swap( grown );
+}
+
+static void LightGrid_BuildNearMask( void )
+{
+    const StaticModelOrigin_t *model;
+    float                      extent = 0.0f;
+    int                        axis;
+    int                        radius;
+    int                        i;
+
+    lightGridNearMask.clear();
+    lightGridDistanceRemoved = 0;
+
+    if ( !( lightGridMaxDistance > 0.0f ) )
+        return;
+
+    for ( axis = 0; axis < 3; axis++ )
+    {
+        lightGridNearMin[axis] = geoGlob.mins[axis];
+
+        if ( geoGlob.maxs[axis] - geoGlob.mins[axis] > extent )
+            extent = geoGlob.maxs[axis] - geoGlob.mins[axis];
+    }
+
+    if ( !( extent > 0.0f ) )
+        return;
+
+    /* Cells of at least 256 units, and never more than about 256 of them along an axis */
+    lightGridNearCell = extent / 256.0f > 256.0f ? extent / 256.0f : 256.0f;
+
+    for ( axis = 0; axis < 3; axis++ )
+        lightGridNearDim[axis] = ( int )floor( ( geoGlob.maxs[axis] - geoGlob.mins[axis] )
+                                               / lightGridNearCell ) + 1;
+
+    lightGridNearMask.assign( ( size_t )lightGridNearDim[0] * lightGridNearDim[1]
+                              * lightGridNearDim[2], 0 );
+
+    /* Geometry (the sky itself doesn't count) */
+    for ( i = 0; i < geoTriCount; i++ )
+    {
+        const GeoTriangle_t *tri = &geoTris[i];
+        vec3_t               mins;
+        vec3_t               maxs;
+        int                  v;
+
+        if ( tri->mskMtl->material->surfaceFlags & SURF_SKY )
+            continue;
+
+        ClearBounds( mins, maxs );
+
+        for ( v = 0; v < 3; v++ )
+            AddPointToBounds( geoGlob.worldSpaceXyz[tri->indices[v]], mins, maxs );
+
+        LightGrid_MarkNearBox( mins, maxs );
+    }
+
+    /* Lights */
+    for ( i = 0; i < PointLight_Count(); i++ )
+        LightGrid_MarkNearBox( pointLights[i].origin, pointLights[i].origin );
+
+    for ( i = 0; i < numBSPPrimaryLights; i++ )
+        LightGrid_MarkNearBox( bspPrimaryLights[i].origin, bspPrimaryLights[i].origin );
+
+    /* Static models need a probe wherever they are */
+    for ( model = lightGridGlob.staticModelOrigins; model; model = model->next )
+        LightGrid_MarkNearBox( model->origin, model->origin );
+
+    radius = ( int )ceil( lightGridMaxDistance / lightGridNearCell );
+
+    for ( axis = 0; axis < 3; axis++ )
+        LightGrid_DilateNearMask( axis, radius );
+}
+
+static qboolean LightGrid_NearGeometry( const vec3_t origin )
+{
+    int x, y, z;
+
+    if ( lightGridNearMask.empty() )
+        return qtrue;
+
+    x = LightGrid_NearCell( 0, origin[0] );
+    y = LightGrid_NearCell( 1, origin[1] );
+    z = LightGrid_NearCell( 2, origin[2] );
+
+    return lightGridNearMask[( size_t )( z * lightGridNearDim[1] + y ) * lightGridNearDim[0] + x] != 0;
+}
+
 /* LightGrid_SuppressPoint  0x00410610 */
 static qboolean LightGrid_SuppressPoint( const LightGridPoint_t *point )
 {
@@ -594,6 +761,12 @@ static qboolean LightGrid_SuppressPoint( const LightGridPoint_t *point )
 
     if ( Geo_PointIsOutsideWorld( origin ) )
         return qtrue;
+
+    if ( !LightGrid_NearGeometry( origin ) )
+    {
+        lightGridDistanceRemoved++;
+        return qtrue;
+    }
 
     if ( LightGrid_PointIsBuried( point, origin ) )
         return qtrue;
@@ -982,7 +1155,9 @@ static qboolean LightGrid_PointLitByLight( const vec3_t origin, int lightIndex )
     int                      hull;
     int                      axis;
 
-    AssertCmp( light->type, ==, GFX_LIGHT_TYPE_OMNI );
+    /* Primary lights are omni or spot lights; spot lights are handled below */
+    Assertx( light->type == GFX_LIGHT_TYPE_OMNI || light->type == GFX_LIGHT_TYPE_SPOT,
+             "(light->type) = %i", light->type );
 
     local[0] = origin[0] - light->origin[0];
     local[1] = origin[1] - light->origin[1];
@@ -2215,9 +2390,16 @@ void LightGrid_Compile( int threads )
     numBSPLightGridEntries  = 0;
     numBSPLightGridRowBytes = 0;
 
+    LightGrid_BuildNearMask();
+
     LightGrid_LoadPoints();
     LightGrid_SortPoints();
     LightGrid_SuppressPoints();
+
+    if ( lightGridDistanceRemoved )
+        Print( "Removed %i light grid points farther than %g units from any geometry or light"
+               " (see -GridMaxDistance).\n", lightGridDistanceRemoved, lightGridMaxDistance );
+
     LightGrid_ExcludePoints();
     LightGrid_SortPoints();
     LightGrid_InsertMissingPoints();

@@ -93,6 +93,10 @@ Run it from the [Call of Duty 4 mod tools](https://github.com/promod/CoD4-Mod-To
 
 `-SuperSample`, `-Traces` and `-Extra` raise quality, and memory use grows with them (roughly with `-Traces` × `-SuperSample`²). If the Win32 build fails with "Out of memory", try the x64 build.
 
+### Light grid size
+
+`-GridMaxDistance [N]` drops light grid points that are farther than `N` units from any geometry, light or static model. It is **off unless you give the option**: `-GridMaxDistance` alone uses `2048` units, and `-GridMaxDistance 1024` uses 1024. It keeps huge, mostly empty maps from producing tens of millions of probes, and it makes the light grid steps faster and lighter on memory. The filter is approximate and errs on the side of keeping a point. It prints how many points it removed.
+
 ### Crash reports
 
 If the program crashes, it prints the exception, the function and source line, and a call stack, and writes the same to `cod4rad_crash.txt` in the current directory. Keep `cod4rad.pdb` next to the exe to get names.

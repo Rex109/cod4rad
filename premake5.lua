@@ -102,6 +102,7 @@ project "cod4rad"
         language "C"
 
     filter "configurations:Debug"
+        runtime "Debug"           -- _DEBUG needs the debug CRT (_CrtDbgReport); Release keeps the release CRT
         defines { "_DEBUG" }
         symbols "On"
         optimize "Off"

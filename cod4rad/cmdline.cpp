@@ -4,6 +4,7 @@
 #include "cmdline.h"
 #include "progress.h"
 #include "gputransport.h"
+#include "lightgrid.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,6 +234,32 @@ static int OptNoModelShadow( int argc, const char **argv )
     return 1;
 }
 
+/* OptGridMaxDistance: the filter is off unless this is given.  The distance is optional:
+   "-GridMaxDistance" alone uses 2048 units, "-GridMaxDistance N" uses N. */
+static int OptGridMaxDistance( int argc, const char **argv )
+{
+    char *end;
+    float value;
+
+    /* The last argument is always the map name, so a number has to come before it */
+    if ( argc >= 3 )
+    {
+        value = ( float )strtod( argv[1], &end );
+
+        if ( end != argv[1] && *end == '\0' )
+        {
+            if ( value < 0.0f )
+                value = 0.0f;
+
+            lightGridMaxDistance = value;
+            return 2;
+        }
+    }
+
+    lightGridMaxDistance = LIGHTGRID_DEFAULT_MAX_DISTANCE;
+    return 1;
+}
+
 /* OptGpu */
 static int OptGpu( int argc, const char **argv )
 {
@@ -407,7 +434,8 @@ static const RadOption_t radOptions[] =                     /* 0x004742f8 */
     { "-NoRelight",         "Disable optimization of using results from last compile",  OptNoRelight         },
     { "-BasisDirCount",     "Sample directions used to approximate lightmap pixel",     OptBasisDirCount     },
     { "-Threads",           "Allows using more or fewer threads than processors",       OptThreads           },
-    { "-Gpu",               "Trace radiosity on the GPU (Direct3D 11); results may differ slightly", OptGpu },
+    { "-GridMaxDistance",   "Drops light grid points farther than N units from geometry or lights (off unless given; N defaults to 2048)", OptGridMaxDistance },
+    { "-Gpu",              "Trace radiosity on the GPU (Direct3D 11); results may differ slightly", OptGpu },
     { "-DumpOptions",       "Displays current settings of most parameters",             OptDumpOptions       },
 };
 
